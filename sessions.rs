@@ -259,7 +259,7 @@ impl SessionStore {
         session: &Session,
         command: &[String],
     ) -> Result<(), SwarmError> {
-        let exe = env::current_exe()?;
+        let exe = supervisor_executable()?;
         let supervisor_log_path = session.path.join("supervisor.log");
         let supervisor_log = OpenOptions::new()
             .create(true)
@@ -718,6 +718,17 @@ async fn open_repo_db_at_path(path: &Path) -> Result<Connection, SwarmError> {
         .map_err(|err| database_error(path, "connect", err))?;
     migrate_repo_db(&conn, path).await?;
     Ok(conn)
+}
+
+fn supervisor_executable() -> Result<PathBuf, SwarmError> {
+    let exe = env::current_exe()?;
+    let candidate = exe.with_file_name("swarmctl");
+
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+
+    Ok(exe)
 }
 
 fn attach_to_socket(socket_path: &Path) -> Result<(), SwarmError> {

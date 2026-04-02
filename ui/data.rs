@@ -1,3 +1,5 @@
+use std::env;
+
 use swarm::{
     SwarmError,
     repos::RepositoryStore,
@@ -155,6 +157,28 @@ pub fn rename_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntr
             sessions,
         ))
     })
+}
+
+pub fn create_session(workspace_ref: &str) -> Result<SessionEntry, SwarmError> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let session_store = SessionStore::open().await?;
+        let command = default_session_command();
+        let session = session_store.create(workspace_ref, &command).await?;
+
+        Ok(SessionEntry {
+            id: session.id,
+            status: session.status,
+            command: session.command.join(" "),
+            log_path: session.log_path.display().to_string(),
+            socket_path: session.socket_path.display().to_string(),
+        })
+    })
+}
+
+fn default_session_command() -> Vec<String> {
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    vec![shell, "-l".to_string()]
 }
 
 fn map_workspace(

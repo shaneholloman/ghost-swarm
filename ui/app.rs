@@ -10,8 +10,8 @@ use std::{
 
 use crate::{
     data::{
-        SessionEntry, WorkspaceEntry, WorkspaceGroup, create_workspace, load_workspace_groups,
-        rename_workspace,
+        SessionEntry, WorkspaceEntry, WorkspaceGroup, create_session, create_workspace,
+        load_workspace_groups, rename_workspace,
     },
     ghostty,
 };
@@ -98,6 +98,10 @@ window {
   margin-bottom: 12px;
 }
 
+.session-toolbar {
+  margin-bottom: 12px;
+}
+
 .session-switcher button {
   background: transparent;
   border: none;
@@ -111,6 +115,23 @@ window {
 .session-switcher button:checked {
   background: rgba(126, 203, 255, 0.12);
   color: #ecf6ff;
+}
+
+.session-add {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: #7a8698;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.session-add:hover {
+  background: rgba(126, 203, 255, 0.08);
+  color: #e7f3ff;
 }
 
 .terminal-host {
@@ -156,6 +177,7 @@ fn build_ui(app: &Application) {
         window: window.clone(),
         selected_workspace: RefCell::new(None),
         editing_workspace: RefCell::new(None),
+        selected_session: RefCell::new(None),
     });
     refresh_ui(&state, None);
 
@@ -166,6 +188,7 @@ struct AppState {
     window: ApplicationWindow,
     selected_workspace: RefCell<Option<String>>,
     editing_workspace: RefCell<Option<String>>,
+    selected_session: RefCell<Option<String>>,
 }
 
 fn refresh_ui(state: &Rc<AppState>, preferred_workspace: Option<String>) {
@@ -185,14 +208,15 @@ fn refresh_ui(state: &Rc<AppState>, preferred_workspace: Option<String>) {
     let shell = GtkBox::new(Orientation::Horizontal, 0);
     shell.add_css_class("app-shell");
 
-    let detail_widgets = DetailWidgets::new();
+    let detail_widgets = DetailWidgets::new(state);
     if let Some(workspace) = selected_workspace.as_ref() {
-        detail_widgets.render_workspace(workspace);
+        detail_widgets.render_workspace(workspace, state);
         *state.selected_workspace.borrow_mut() = Some(workspace_ref(workspace));
     } else {
         detail_widgets.render_empty();
         *state.selected_workspace.borrow_mut() = None;
         *state.editing_workspace.borrow_mut() = None;
+        *state.selected_session.borrow_mut() = None;
     }
 
     let sidebar = build_sidebar(
@@ -286,7 +310,8 @@ fn build_sidebar(
                 .find(|(candidate, _)| candidate == row)
             {
                 *state.selected_workspace.borrow_mut() = Some(workspace_ref(workspace));
-                detail_widgets.render_workspace(workspace);
+                *state.selected_session.borrow_mut() = None;
+                detail_widgets.render_workspace(workspace, &state);
             }
         });
     }
@@ -383,6 +408,7 @@ fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
             let workspace_ref = workspace_ref(&workspace);
             *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
             *state.editing_workspace.borrow_mut() = Some(workspace_ref.clone());
+            *state.selected_session.borrow_mut() = None;
             schedule_refresh(state, Some(workspace_ref));
         }
         Err(err) => {
@@ -467,6 +493,7 @@ fn commit_workspace_rename(state: &Rc<AppState>, current_workspace_ref: &str, ne
         Ok(workspace) => {
             let next_workspace_ref = workspace_ref(&workspace);
             *state.selected_workspace.borrow_mut() = Some(next_workspace_ref.clone());
+            *state.selected_session.borrow_mut() = None;
             schedule_refresh(state, Some(next_workspace_ref));
         }
         Err(err) => {
@@ -498,15 +525,20 @@ fn next_workspace_placeholder() -> String {
 #[derive(Clone)]
 struct DetailWidgets {
     container: GtkBox,
+    session_toolbar: GtkBox,
     session_switcher: StackSwitcher,
     session_stack: Stack,
 }
 
 impl DetailWidgets {
-    fn new() -> Self {
+    fn new(state: &Rc<AppState>) -> Self {
         let container = GtkBox::new(Orientation::Vertical, 10);
         container.set_hexpand(true);
         container.set_vexpand(true);
+
+        let session_toolbar = GtkBox::new(Orientation::Horizontal, 8);
+        session_toolbar.set_halign(Align::Start);
+        session_toolbar.add_css_class("session-toolbar");
 
         let session_stack = Stack::new();
         session_stack.set_hexpand(true);
@@ -517,23 +549,50 @@ impl DetailWidgets {
         session_switcher.set_halign(Align::Start);
         session_switcher.set_stack(Some(&session_stack));
 
-        container.append(&session_switcher);
+        {
+            let state = state.clone();
+            session_stack.connect_visible_child_name_notify(move |stack| {
+                *state.selected_session.borrow_mut() =
+                    stack.visible_child_name().map(|name| name.to_string());
+            });
+        }
+
+        session_toolbar.append(&session_switcher);
+        container.append(&session_toolbar);
         container.append(&session_stack);
 
         Self {
             container,
+            session_toolbar,
             session_switcher,
             session_stack,
         }
     }
 
     fn render_empty(&self) {
+        clear_box(&self.session_toolbar);
         clear_stack(&self.session_stack);
         self.session_switcher.set_visible(false);
     }
 
-    fn render_workspace(&self, workspace: &WorkspaceEntry) {
+    fn render_workspace(&self, workspace: &WorkspaceEntry, state: &Rc<AppState>) {
+        clear_box(&self.session_toolbar);
         clear_stack(&self.session_stack);
+
+        self.session_switcher.set_stack(Some(&self.session_stack));
+        self.session_toolbar.append(&self.session_switcher);
+
+        let add_button = Button::with_label("+");
+        add_button.set_valign(Align::Center);
+        add_button.add_css_class("session-add");
+        {
+            let state = state.clone();
+            let workspace_ref = workspace_ref(workspace);
+            add_button.connect_clicked(move |_| {
+                create_and_select_session(&state, &workspace_ref);
+            });
+        }
+        self.session_toolbar.append(&add_button);
 
         if workspace.sessions.is_empty() {
             self.session_switcher.set_visible(false);
@@ -555,14 +614,37 @@ impl DetailWidgets {
             self.session_stack
                 .add_titled(&host, Some(&session.id), &session.id);
         }
-        self.session_stack
-            .set_visible_child_name(&workspace.sessions[0].id);
+        if let Some(selected_session) = state.selected_session.borrow().as_ref() {
+            self.session_stack.set_visible_child_name(selected_session);
+        } else {
+            self.session_stack
+                .set_visible_child_name(&workspace.sessions[0].id);
+        }
+    }
+}
+
+fn clear_box(container: &GtkBox) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
     }
 }
 
 fn clear_stack(stack: &Stack) {
     while let Some(child) = stack.first_child() {
         stack.remove(&child);
+    }
+}
+
+fn create_and_select_session(state: &Rc<AppState>, workspace_ref: &str) {
+    match create_session(workspace_ref) {
+        Ok(session) => {
+            *state.selected_workspace.borrow_mut() = Some(workspace_ref.to_string());
+            *state.selected_session.borrow_mut() = Some(session.id.clone());
+            schedule_refresh(state, Some(workspace_ref.to_string()));
+        }
+        Err(err) => {
+            eprintln!("failed to create session: {err}");
+        }
     }
 }
 
