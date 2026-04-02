@@ -182,6 +182,90 @@ impl WorkspaceStore {
         Ok(workspace)
     }
 
+    pub async fn rename(&self, workspace: &str, new_name: &str) -> Result<Workspace, SwarmError> {
+        let reference = parse_workspace_reference(workspace)?;
+        let repo = self
+            .resolve_repo_from_workspace_reference(&reference)
+            .await?;
+        let db = self.open_repo_db(&repo).await?;
+        let workspace = self
+            .find_workspace(&db, &repo, &reference.workspace)
+            .await?
+            .ok_or_else(|| SwarmError::WorkspaceNotFound(workspace.to_string()))?;
+        let next_name = resolve_workspace_name(Some(new_name), &workspace.branch)?;
+
+        if next_name == workspace.name {
+            return Ok(workspace);
+        }
+
+        if self.find_workspace(&db, &repo, &next_name).await?.is_some() {
+            return Err(SwarmError::DuplicateWorkspace(format!(
+                "{}:{}",
+                repo.alias.as_deref().unwrap_or(&repo.name),
+                next_name
+            )));
+        }
+
+        let sessions = self.count_workspace_sessions(&db, &workspace.name).await?;
+        if sessions > 0 {
+            return Err(SwarmError::InvalidWorkspace(format!(
+                "cannot rename workspace `{}` with sessions",
+                workspace.name
+            )));
+        }
+
+        let bare_repo_path = self.repos.bare_repo_path(&repo);
+        let next_path = workspace
+            .path
+            .parent()
+            .ok_or(SwarmError::PathResolution)?
+            .join(&next_name);
+
+        run_git(
+            Some(&self.repos.repo_dir(&repo)),
+            [
+                format!("--git-dir={}", bare_repo_path.display()),
+                "branch".to_string(),
+                "-m".to_string(),
+                workspace.branch.clone(),
+                next_name.clone(),
+            ],
+        )?;
+
+        run_git(
+            Some(&self.repos.repo_dir(&repo)),
+            [
+                format!("--git-dir={}", bare_repo_path.display()),
+                "worktree".to_string(),
+                "move".to_string(),
+                workspace.path.display().to_string(),
+                next_path.display().to_string(),
+            ],
+        )?;
+
+        db.execute(
+            "UPDATE workspaces
+             SET name = ?2, branch = ?3, path = ?4
+             WHERE name = ?1",
+            (
+                workspace.name.as_str(),
+                next_name.as_str(),
+                next_name.as_str(),
+                path_to_string(&next_path)?,
+            ),
+        )
+        .await?;
+
+        Ok(Workspace {
+            repository: repo.canonical(),
+            repository_alias: repo.alias.clone().unwrap_or_else(|| repo.name.clone()),
+            name: next_name.clone(),
+            branch: next_name,
+            path: next_path,
+            created_at: workspace.created_at,
+        })
+    }
+
     async fn resolve_repo_from_workspace_reference(
         &self,
         reference: &WorkspaceReference,
@@ -252,6 +336,27 @@ impl WorkspaceStore {
         }
 
         Ok(None)
+    }
+
+    async fn count_workspace_sessions(
+        &self,
+        db: &Connection,
+        workspace_name: &str,
+    ) -> Result<i64, SwarmError> {
+        let mut stmt = db
+            .prepare(
+                "SELECT COUNT(*)
+                 FROM sessions
+                 WHERE workspace_name = ?1",
+            )
+            .await?;
+        let mut rows = stmt.query([workspace_name]).await?;
+
+        if let Some(row) = rows.next().await? {
+            return Ok(row.get::<i64>(0)?);
+        }
+
+        Ok(0)
     }
 
     fn ensure_bare_repo(&self, repo: &Repository) -> Result<String, SwarmError> {

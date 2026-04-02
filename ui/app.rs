@@ -1,12 +1,18 @@
 use gtk::{
-    Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, Label, ListBox, ListBoxRow,
-    Orientation, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, SelectionMode,
-    Stack, StackSwitcher, Widget, gdk, prelude::*,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Label,
+    ListBox, ListBoxRow, Orientation, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION,
+    ScrolledWindow, SelectionMode, Stack, StackSwitcher, Widget, gdk, glib, prelude::*,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use crate::{
-    data::{SessionEntry, WorkspaceEntry, WorkspaceGroup, load_workspace_groups},
+    data::{
+        SessionEntry, WorkspaceEntry, WorkspaceGroup, create_workspace, load_workspace_groups,
+        rename_workspace,
+    },
     ghostty,
 };
 
@@ -30,13 +36,33 @@ window {
   padding: 16px 20px;
 }
 
+.repo-row {
+  margin-top: 14px;
+  margin-bottom: 8px;
+}
+
 .repo-header {
   color: #566172;
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.09em;
-  margin-top: 14px;
-  margin-bottom: 8px;
+}
+
+.repo-add {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: #7a8698;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.repo-add:hover {
+  background: rgba(126, 203, 255, 0.08);
+  color: #e7f3ff;
 }
 
 .workspace-list {
@@ -68,19 +94,7 @@ window {
   font-size: 11px;
 }
 
-.panel-title {
-  color: #f3f5f7;
-  font-size: 22px;
-  font-weight: 800;
-}
-
-.panel-copy {
-  color: #7c8695;
-  font-size: 12px;
-}
-
 .session-switcher {
-  margin-top: 10px;
   margin-bottom: 12px;
 }
 
@@ -99,19 +113,6 @@ window {
   color: #ecf6ff;
 }
 
-.detail-label {
-  color: #5f6978;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-}
-
-.detail-value {
-  color: #dbe1e8;
-  font-size: 13px;
-  font-weight: 500;
-}
-
 .terminal-host {
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.05);
@@ -122,39 +123,26 @@ window {
 .terminal-view {
   background: transparent;
   color: #edf2f7;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: monospace;
   font-size: 12px;
   padding: 16px;
-}
-
-.terminal-title {
-  color: #f2f5f8;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.terminal-subtitle {
-  color: #7c8695;
-  font-size: 11px;
 }
 
 .terminal-empty {
   color: #5e6877;
   font-size: 13px;
 }
+
 "#;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let groups = load_workspace_groups()?;
     let app = Application::builder().application_id(APP_ID).build();
-    let groups = Rc::new(groups);
-
-    app.connect_activate(move |app| build_ui(app, groups.clone()));
+    app.connect_activate(build_ui);
     app.run();
     Ok(())
 }
 
-fn build_ui(app: &Application, groups: Rc<Vec<WorkspaceGroup>>) {
+fn build_ui(app: &Application) {
     install_css();
 
     let window = ApplicationWindow::builder()
@@ -164,29 +152,72 @@ fn build_ui(app: &Application, groups: Rc<Vec<WorkspaceGroup>>) {
         .default_height(920)
         .build();
 
+    let state = Rc::new(AppState {
+        window: window.clone(),
+        selected_workspace: RefCell::new(None),
+        editing_workspace: RefCell::new(None),
+    });
+    refresh_ui(&state, None);
+
+    window.present();
+}
+
+struct AppState {
+    window: ApplicationWindow,
+    selected_workspace: RefCell<Option<String>>,
+    editing_workspace: RefCell<Option<String>>,
+}
+
+fn refresh_ui(state: &Rc<AppState>, preferred_workspace: Option<String>) {
+    let groups = match load_workspace_groups() {
+        Ok(groups) => groups,
+        Err(err) => {
+            eprintln!("failed to load workspaces: {err}");
+            return;
+        }
+    };
+
+    let selected_workspace = preferred_workspace
+        .or_else(|| state.selected_workspace.borrow().clone())
+        .and_then(|workspace_ref| find_workspace_by_ref(&groups, &workspace_ref))
+        .or_else(|| first_workspace(&groups));
+
     let shell = GtkBox::new(Orientation::Horizontal, 0);
     shell.add_css_class("app-shell");
 
     let detail_widgets = DetailWidgets::new();
-    let selected_workspace = first_workspace(groups.as_ref());
     if let Some(workspace) = selected_workspace.as_ref() {
         detail_widgets.render_workspace(workspace);
+        *state.selected_workspace.borrow_mut() = Some(workspace_ref(workspace));
     } else {
         detail_widgets.render_empty();
+        *state.selected_workspace.borrow_mut() = None;
+        *state.editing_workspace.borrow_mut() = None;
     }
 
-    let sidebar = build_sidebar(groups.as_ref(), detail_widgets.clone(), selected_workspace);
+    let sidebar = build_sidebar(
+        &groups,
+        state.clone(),
+        detail_widgets.clone(),
+        selected_workspace,
+    );
     let content = build_content(detail_widgets.container.clone());
 
     shell.append(&sidebar);
     shell.append(&content);
+    state.window.set_child(Some(&shell));
+}
 
-    window.set_child(Some(&shell));
-    window.present();
+fn schedule_refresh(state: &Rc<AppState>, preferred_workspace: Option<String>) {
+    let state = state.clone();
+    glib::idle_add_local_once(move || {
+        refresh_ui(&state, preferred_workspace);
+    });
 }
 
 fn build_sidebar(
     groups: &[WorkspaceGroup],
+    state: Rc<AppState>,
     detail_widgets: DetailWidgets,
     selected_workspace: Option<WorkspaceEntry>,
 ) -> GtkBox {
@@ -196,14 +227,10 @@ fn build_sidebar(
     sidebar.set_vexpand(true);
     sidebar.add_css_class("sidebar");
 
-    let header = GtkBox::new(Orientation::Vertical, 4);
-    sidebar.append(&header);
-
     let scroller = ScrolledWindow::new();
     scroller.set_policy(PolicyType::Never, PolicyType::Automatic);
     scroller.set_hexpand(true);
     scroller.set_vexpand(true);
-    scroller.set_margin_top(18);
 
     let list = ListBox::new();
     list.set_selection_mode(SelectionMode::Single);
@@ -213,13 +240,16 @@ fn build_sidebar(
     let rows = Rc::new(RefCell::new(Vec::<(ListBoxRow, WorkspaceEntry)>::new()));
 
     for group in groups {
-        let repo_header = Label::new(Some(&group.repo_label.to_uppercase()));
-        repo_header.set_xalign(0.0);
-        repo_header.add_css_class("repo-header");
-        sidebar_append_static_row(&list, &repo_header);
+        let repo_row = build_repo_row(&state, &group.repo_label, &group.repo_canonical);
+        sidebar_append_static_row(&list, &repo_row);
 
         for workspace in &group.workspaces {
-            let row = build_workspace_row(workspace);
+            let is_editing = state
+                .editing_workspace
+                .borrow()
+                .as_ref()
+                .is_some_and(|editing| editing == &workspace_ref(workspace));
+            let row = build_workspace_row(workspace, &state, is_editing);
             if selected_workspace
                 .as_ref()
                 .is_some_and(|selected| selected.path == workspace.path)
@@ -234,34 +264,70 @@ fn build_sidebar(
     if rows.borrow().is_empty() {
         let empty = Label::new(Some("No workspaces yet."));
         empty.set_xalign(0.0);
-        empty.add_css_class("panel-copy");
+        empty.add_css_class("terminal-empty");
         sidebar_append_static_row(&list, &empty);
     }
 
-    let rows_for_signal = rows.clone();
-    list.connect_row_selected(move |_list, row| {
-        let Some(row) = row else {
-            return;
-        };
+    {
+        let rows_for_signal = rows.clone();
+        let state = state.clone();
+        list.connect_row_selected(move |_list, row| {
+            let Some(row) = row else {
+                return;
+            };
 
-        if !row.is_selectable() {
-            return;
-        }
+            if !row.is_selectable() {
+                return;
+            }
 
-        if let Some((_, workspace)) = rows_for_signal
-            .borrow()
-            .iter()
-            .find(|(candidate, _)| candidate == row)
-        {
-            detail_widgets.render_workspace(workspace);
-        }
-    });
+            if let Some((_, workspace)) = rows_for_signal
+                .borrow()
+                .iter()
+                .find(|(candidate, _)| candidate == row)
+            {
+                *state.selected_workspace.borrow_mut() = Some(workspace_ref(workspace));
+                detail_widgets.render_workspace(workspace);
+            }
+        });
+    }
 
     sidebar.append(&scroller);
     sidebar
 }
 
-fn build_workspace_row(workspace: &WorkspaceEntry) -> ListBoxRow {
+fn build_repo_row(state: &Rc<AppState>, repo_label: &str, repo_canonical: &str) -> GtkBox {
+    let row = GtkBox::new(Orientation::Horizontal, 0);
+    row.set_halign(Align::Fill);
+    row.set_hexpand(true);
+    row.add_css_class("repo-row");
+
+    let label = Label::new(Some(&repo_label.to_uppercase()));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.add_css_class("repo-header");
+
+    let button = Button::with_label("+");
+    button.set_valign(Align::Center);
+    button.add_css_class("repo-add");
+
+    {
+        let state = state.clone();
+        let repo_canonical = repo_canonical.to_string();
+        button.connect_clicked(move |_| {
+            create_and_edit_workspace(&state, &repo_canonical);
+        });
+    }
+
+    row.append(&label);
+    row.append(&button);
+    row
+}
+
+fn build_workspace_row(
+    workspace: &WorkspaceEntry,
+    state: &Rc<AppState>,
+    is_editing: bool,
+) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.set_selectable(true);
     row.set_activatable(true);
@@ -270,9 +336,23 @@ fn build_workspace_row(workspace: &WorkspaceEntry) -> ListBoxRow {
     let card = GtkBox::new(Orientation::Vertical, 4);
     card.add_css_class("workspace-card");
 
-    let name = Label::new(Some(&workspace.name));
-    name.set_xalign(0.0);
-    name.add_css_class("workspace-name");
+    if is_editing {
+        let entry = Entry::new();
+        entry.set_hexpand(true);
+        entry.set_text(&workspace.name);
+        entry.select_region(0, -1);
+        entry.add_css_class("workspace-name");
+        install_workspace_rename_handlers(&entry, state, workspace);
+        card.append(&entry);
+        glib::idle_add_local_once(move || {
+            entry.grab_focus();
+        });
+    } else {
+        let name = Label::new(Some(&workspace.name));
+        name.set_xalign(0.0);
+        name.add_css_class("workspace-name");
+        card.append(&name);
+    }
 
     let meta = Label::new(Some(&format!(
         "{}  •  {} sessions",
@@ -282,7 +362,6 @@ fn build_workspace_row(workspace: &WorkspaceEntry) -> ListBoxRow {
     meta.set_xalign(0.0);
     meta.add_css_class("workspace-meta");
 
-    card.append(&name);
     card.append(&meta);
     row.set_child(Some(&card));
     row
@@ -295,6 +374,21 @@ fn build_content(detail_container: GtkBox) -> GtkBox {
     content.add_css_class("content");
     content.append(&detail_container);
     content
+}
+
+fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
+    let placeholder = next_workspace_placeholder();
+    match create_workspace(repo_canonical, Some(&placeholder)) {
+        Ok(workspace) => {
+            let workspace_ref = workspace_ref(&workspace);
+            *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
+            *state.editing_workspace.borrow_mut() = Some(workspace_ref.clone());
+            schedule_refresh(state, Some(workspace_ref));
+        }
+        Err(err) => {
+            eprintln!("failed to create workspace: {err}");
+        }
+    }
 }
 
 fn sidebar_append_static_row<W: IsA<Widget>>(list: &ListBox, widget: &W) {
@@ -311,10 +405,99 @@ fn first_workspace(groups: &[WorkspaceGroup]) -> Option<WorkspaceEntry> {
         .find_map(|group| group.workspaces.first().cloned())
 }
 
+fn find_workspace_by_ref(groups: &[WorkspaceGroup], selected_ref: &str) -> Option<WorkspaceEntry> {
+    groups.iter().find_map(|group| {
+        group.workspaces.iter().find_map(|workspace| {
+            if workspace_ref(workspace) == selected_ref {
+                Some(workspace.clone())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn workspace_ref(workspace: &WorkspaceEntry) -> String {
+    format!("{}:{}", workspace.repo_canonical, workspace.name)
+}
+
+fn install_workspace_rename_handlers(
+    entry: &Entry,
+    state: &Rc<AppState>,
+    workspace: &WorkspaceEntry,
+) {
+    let workspace_ref = workspace_ref(workspace);
+    let committed = Rc::new(Cell::new(false));
+
+    {
+        let state = state.clone();
+        let workspace_ref = workspace_ref.clone();
+        let committed = committed.clone();
+        entry.connect_activate(move |entry| {
+            committed.set(true);
+            commit_workspace_rename(&state, &workspace_ref, &entry.text());
+        });
+    }
+
+    {
+        let state = state.clone();
+        let workspace_ref = workspace_ref.clone();
+        let committed = committed.clone();
+        entry.connect_has_focus_notify(move |entry| {
+            if entry.has_focus() || committed.get() {
+                return;
+            }
+
+            committed.set(true);
+            commit_workspace_rename(&state, &workspace_ref, &entry.text());
+        });
+    }
+}
+
+fn commit_workspace_rename(state: &Rc<AppState>, current_workspace_ref: &str, next_name: &str) {
+    let next_name = next_name.trim();
+    *state.editing_workspace.borrow_mut() = None;
+
+    if next_name.is_empty() {
+        schedule_refresh(state, Some(current_workspace_ref.to_string()));
+        return;
+    }
+
+    match rename_workspace(current_workspace_ref, next_name) {
+        Ok(workspace) => {
+            let next_workspace_ref = workspace_ref(&workspace);
+            *state.selected_workspace.borrow_mut() = Some(next_workspace_ref.clone());
+            schedule_refresh(state, Some(next_workspace_ref));
+        }
+        Err(err) => {
+            eprintln!("failed to rename workspace: {err}");
+            *state.editing_workspace.borrow_mut() = Some(current_workspace_ref.to_string());
+            schedule_refresh(state, Some(current_workspace_ref.to_string()));
+        }
+    }
+}
+
+fn next_workspace_placeholder() -> String {
+    let groups = load_workspace_groups().unwrap_or_default();
+    for index in 1.. {
+        let candidate = format!("new-{index}");
+        let exists = groups.iter().any(|group| {
+            group
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.name == candidate)
+        });
+        if !exists {
+            return candidate;
+        }
+    }
+
+    "new".to_string()
+}
+
 #[derive(Clone)]
 struct DetailWidgets {
     container: GtkBox,
-    details: GtkBox,
     session_switcher: StackSwitcher,
     session_stack: Stack,
 }
@@ -325,10 +508,6 @@ impl DetailWidgets {
         container.set_hexpand(true);
         container.set_vexpand(true);
 
-        let details = GtkBox::new(Orientation::Vertical, 10);
-        details.set_halign(Align::Start);
-        details.set_hexpand(false);
-
         let session_stack = Stack::new();
         session_stack.set_hexpand(true);
         session_stack.set_vexpand(true);
@@ -338,26 +517,22 @@ impl DetailWidgets {
         session_switcher.set_halign(Align::Start);
         session_switcher.set_stack(Some(&session_stack));
 
-        container.append(&details);
         container.append(&session_switcher);
         container.append(&session_stack);
 
         Self {
             container,
-            details,
             session_switcher,
             session_stack,
         }
     }
 
     fn render_empty(&self) {
-        clear_box(&self.details);
         clear_stack(&self.session_stack);
         self.session_switcher.set_visible(false);
     }
 
     fn render_workspace(&self, workspace: &WorkspaceEntry) {
-        clear_box(&self.details);
         clear_stack(&self.session_stack);
 
         if workspace.sessions.is_empty() {
@@ -382,30 +557,6 @@ impl DetailWidgets {
         }
         self.session_stack
             .set_visible_child_name(&workspace.sessions[0].id);
-    }
-}
-
-fn detail_block(label: &str, value: &str) -> GtkBox {
-    let block = GtkBox::new(Orientation::Vertical, 2);
-
-    let title = Label::new(Some(label));
-    title.set_xalign(0.0);
-    title.add_css_class("detail-label");
-
-    let value_label = Label::new(Some(value));
-    value_label.set_xalign(0.0);
-    value_label.set_wrap(true);
-    value_label.set_max_width_chars(96);
-    value_label.add_css_class("detail-value");
-
-    block.append(&title);
-    block.append(&value_label);
-    block
-}
-
-fn clear_box(container: &GtkBox) {
-    while let Some(child) = container.first_child() {
-        container.remove(&child);
     }
 }
 
