@@ -59,7 +59,7 @@ pub fn terminal_host(session: &SessionEntry) -> GtkBox {
     install_draw_func(&area, state.clone());
     install_key_controller(&area, state.clone());
     install_scroll_controller(&area, state.clone());
-    install_focus_controller(&area);
+    install_focus_controller(&area, state.clone());
     install_scrollbar_sync(&adjustment, state.clone());
     install_socket_pump(state);
 
@@ -91,7 +91,13 @@ fn install_socket_pump(state: Rc<RefCell<SessionTerminalState>>) {
 
 fn install_key_controller(area: &DrawingArea, state: Rc<RefCell<SessionTerminalState>>) {
     let controller = EventControllerKey::new();
+    let area_for_clipboard = area.clone();
     controller.connect_key_pressed(move |_controller, key, _keycode, modifiers| {
+        if is_paste_shortcut(key, modifiers) {
+            paste_from_clipboard(&area_for_clipboard, state.clone(), false);
+            return glib::Propagation::Stop;
+        }
+
         if let Ok(mut state) = state.try_borrow_mut() {
             state.handle_key(key, modifiers);
         }
@@ -119,12 +125,16 @@ fn install_scrollbar_sync(adjustment: &Adjustment, state: Rc<RefCell<SessionTerm
     });
 }
 
-fn install_focus_controller(area: &DrawingArea) {
+fn install_focus_controller(area: &DrawingArea, state: Rc<RefCell<SessionTerminalState>>) {
     let controller = GestureClick::new();
     {
         let area = area.clone();
-        controller.connect_pressed(move |_gesture, _n_press, _x, _y| {
+        let state = state.clone();
+        controller.connect_pressed(move |gesture, _n_press, _x, _y| {
             area.grab_focus();
+            if gesture.current_button() == 2 {
+                paste_from_clipboard(&area, state.clone(), true);
+            }
         });
     }
     area.add_controller(controller);
@@ -415,6 +425,16 @@ impl SessionTerminalState {
             let _ = socket.flush();
         }
     }
+
+    fn paste_text(&mut self, text: &str) {
+        let Some(socket) = &mut self.socket else {
+            return;
+        };
+
+        if socket.write_all(text.as_bytes()).is_ok() {
+            let _ = socket.flush();
+        }
+    }
 }
 
 fn resolved_colors(
@@ -512,6 +532,39 @@ fn set_source_color(cr: &gtk::cairo::Context, color: RgbColor) {
         f64::from(color.g) / 255.0,
         f64::from(color.b) / 255.0,
     );
+}
+
+fn is_paste_shortcut(key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+    let ctrl_shift = modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+        && modifiers.contains(gdk::ModifierType::SHIFT_MASK);
+    let shift_only = modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+        && !modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+        && !modifiers.contains(gdk::ModifierType::ALT_MASK);
+
+    (ctrl_shift && matches!(key, gdk::Key::V | gdk::Key::v))
+        || (shift_only && matches!(key, gdk::Key::Insert))
+}
+
+fn paste_from_clipboard(
+    area: &DrawingArea,
+    state: Rc<RefCell<SessionTerminalState>>,
+    primary: bool,
+) {
+    let clipboard = if primary {
+        area.primary_clipboard()
+    } else {
+        area.clipboard()
+    };
+
+    clipboard.read_text_async(None::<&gtk::gio::Cancellable>, move |result| {
+        let Ok(Some(text)) = result else {
+            return;
+        };
+
+        if let Ok(mut state) = state.try_borrow_mut() {
+            state.paste_text(text.as_str());
+        }
+    });
 }
 
 fn encode_key(key: gdk::Key, modifiers: gdk::ModifierType) -> Vec<u8> {
