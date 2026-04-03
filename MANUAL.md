@@ -19,7 +19,7 @@ Example: `github.com/penberg/swarm`
 - remove a repository from `swarm`
 - list repositories known to `swarm`
 
-Repository commands do not create workspaces and do not start agents.
+Repository commands do not create workspaces or sessions.
 
 ## Workspaces
 
@@ -327,6 +327,7 @@ swarm ws create <repository> [name]
 - Resolves the repository by alias first, then by canonical identifier.
 - Creates a workspace record in `repo.db`.
 - Creates a git worktree under `repos/<host>/<owner>/<name>/workspaces/<workspace-name>/`.
+- Starts a default session for the new workspace using the user's login shell.
 - Rejects duplicate workspace names within the same repository.
 
 #### Examples
@@ -341,6 +342,7 @@ swarm ws create github.com/penberg/swarm review-docs
 
 ```text
 Created workspace main for swarm
+Created session 01JSESSIONEXAMPLE
 ```
 
 ### `swarm workspace list`

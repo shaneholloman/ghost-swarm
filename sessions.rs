@@ -50,6 +50,11 @@ pub struct SessionStore {
     workspaces: WorkspaceStore,
 }
 
+pub fn default_session_command() -> Vec<String> {
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    vec![shell, "-l".to_string()]
+}
+
 impl SessionStore {
     pub async fn open() -> Result<Self, SwarmError> {
         Ok(Self {

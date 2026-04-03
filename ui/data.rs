@@ -1,9 +1,7 @@
-use std::env;
-
 use swarm::{
     SwarmError,
     repos::RepositoryStore,
-    sessions::SessionStore,
+    sessions::{SessionStore, default_session_command},
     workspaces::{Workspace, WorkspaceStore},
 };
 
@@ -103,6 +101,12 @@ pub fn create_workspace(
             .ok_or_else(|| SwarmError::RepositoryNotFound(repository.to_string()))?;
         let workspace = workspace_store.create(repository, name).await?;
         let workspace_ref = format!("{}:{}", workspace.repository, workspace.name);
+        if let Err(err) = session_store
+            .create(&workspace_ref, &default_session_command())
+            .await
+        {
+            eprintln!("failed to create default session for {workspace_ref}: {err}");
+        }
         let sessions = session_store
             .list(Some(&workspace_ref))
             .await?
@@ -163,8 +167,9 @@ pub fn create_session(workspace_ref: &str) -> Result<SessionEntry, SwarmError> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         let session_store = SessionStore::open().await?;
-        let command = default_session_command();
-        let session = session_store.create(workspace_ref, &command).await?;
+        let session = session_store
+            .create(workspace_ref, &default_session_command())
+            .await?;
 
         Ok(SessionEntry {
             id: session.id,
@@ -174,11 +179,6 @@ pub fn create_session(workspace_ref: &str) -> Result<SessionEntry, SwarmError> {
             socket_path: session.socket_path.display().to_string(),
         })
     })
-}
-
-fn default_session_command() -> Vec<String> {
-    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    vec![shell, "-l".to_string()]
 }
 
 fn map_workspace(
