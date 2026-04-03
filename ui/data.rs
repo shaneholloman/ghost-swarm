@@ -16,6 +16,8 @@ pub struct WorkspaceGroup {
     pub repo_label: String,
     pub repo_canonical: String,
     pub repo_status: Option<String>,
+    pub collapsed: bool,
+    pub workspace_count: usize,
     pub workspaces: Vec<WorkspaceEntry>,
 }
 
@@ -78,11 +80,14 @@ pub fn load_workspace_groups() -> Result<Vec<WorkspaceGroup>, SwarmError> {
             for workspace in workspaces {
                 workspace_entries.push(workspace.await?);
             }
+            let workspace_count = workspace_entries.len();
 
             groups.push(WorkspaceGroup {
                 repo_label,
                 repo_canonical,
                 repo_status,
+                collapsed: repo.collapsed,
+                workspace_count,
                 workspaces: workspace_entries,
             });
         }
@@ -140,6 +145,24 @@ pub fn sync_repository(repository: &str) -> Result<(), SwarmError> {
     runtime.block_on(async {
         let repo_store = RepositoryStore::open().await?;
         repo_store.sync(repository).await?;
+        Ok(())
+    })
+}
+
+pub fn collapse_repository(repository: &str) -> Result<(), SwarmError> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let repo_store = RepositoryStore::open().await?;
+        repo_store.collapse(repository).await?;
+        Ok(())
+    })
+}
+
+pub fn expand_repository(repository: &str) -> Result<(), SwarmError> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let repo_store = RepositoryStore::open().await?;
+        repo_store.expand(repository).await?;
         Ok(())
     })
 }

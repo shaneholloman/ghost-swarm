@@ -16,6 +16,7 @@ pub struct Repository {
     pub owner: String,
     pub name: String,
     pub alias: Option<String>,
+    pub collapsed: bool,
 }
 
 impl Repository {
@@ -47,6 +48,7 @@ impl Repository {
             owner: owner.to_string(),
             name: name.to_string(),
             alias: Some(default_alias),
+            collapsed: false,
         })
     }
 
@@ -129,6 +131,7 @@ impl RepositoryStore {
                 owner TEXT NOT NULL,
                 name TEXT NOT NULL,
                 alias TEXT,
+                collapsed INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY (host, owner, name)
             );
@@ -140,6 +143,7 @@ impl RepositoryStore {
         )
         .await
         .map_err(|err| database_error(&index_db_path, "initialize schema", err))?;
+        ensure_collapsed_column(&conn, &index_db_path).await?;
 
         Ok(Self { paths, conn })
     }
@@ -189,12 +193,13 @@ impl RepositoryStore {
 
         self.conn
             .execute(
-                "INSERT INTO repos (host, owner, name, alias, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO repos (host, owner, name, alias, collapsed, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 (
                     repo.host.as_str(),
                     repo.owner.as_str(),
                     repo.name.as_str(),
                     repo.alias.as_deref(),
+                    repo.collapsed,
                     unix_timestamp(),
                 ),
             )
@@ -207,7 +212,7 @@ impl RepositoryStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT host, owner, name, alias
+                "SELECT host, owner, name, alias, collapsed
                  FROM repos
                  ORDER BY host, owner, name",
             )
@@ -221,6 +226,7 @@ impl RepositoryStore {
                 owner: row.get::<String>(1)?,
                 name: row.get::<String>(2)?,
                 alias: row.get::<Option<String>>(3)?,
+                collapsed: row.get::<i64>(4)? != 0,
             });
         }
 
@@ -351,11 +357,19 @@ impl RepositoryStore {
         Ok(repo)
     }
 
+    pub async fn collapse(&self, repository: &str) -> Result<Repository, SwarmError> {
+        self.set_collapsed(repository, true).await
+    }
+
+    pub async fn expand(&self, repository: &str) -> Result<Repository, SwarmError> {
+        self.set_collapsed(repository, false).await
+    }
+
     async fn find_repository(&self, repo: &Repository) -> Result<Option<Repository>, SwarmError> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT host, owner, name, alias
+                "SELECT host, owner, name, alias, collapsed
                  FROM repos
                  WHERE host = ?1 AND owner = ?2 AND name = ?3",
             )
@@ -370,6 +384,7 @@ impl RepositoryStore {
                 owner: row.get::<String>(1)?,
                 name: row.get::<String>(2)?,
                 alias: row.get::<Option<String>>(3)?,
+                collapsed: row.get::<i64>(4)? != 0,
             }));
         }
 
@@ -398,6 +413,7 @@ impl RepositoryStore {
                     owner: repo.owner,
                     name: repo.name,
                     alias: None,
+                    collapsed: false,
                 })
                 .await;
         }
@@ -409,7 +425,7 @@ impl RepositoryStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT host, owner, name, alias
+                "SELECT host, owner, name, alias, collapsed
                  FROM repos
                  WHERE alias = ?1
                  LIMIT 1",
@@ -423,11 +439,67 @@ impl RepositoryStore {
                 owner: row.get::<String>(1)?,
                 name: row.get::<String>(2)?,
                 alias: row.get::<Option<String>>(3)?,
+                collapsed: row.get::<i64>(4)? != 0,
             }));
         }
 
         Ok(None)
     }
+
+    async fn set_collapsed(
+        &self,
+        repository: &str,
+        collapsed: bool,
+    ) -> Result<Repository, SwarmError> {
+        let repo = self
+            .resolve(repository)
+            .await?
+            .ok_or_else(|| SwarmError::RepositoryNotFound(repository.to_string()))?;
+
+        self.conn
+            .execute(
+                "UPDATE repos
+                 SET collapsed = ?4
+                 WHERE host = ?1 AND owner = ?2 AND name = ?3",
+                (
+                    repo.host.as_str(),
+                    repo.owner.as_str(),
+                    repo.name.as_str(),
+                    collapsed,
+                ),
+            )
+            .await?;
+
+        Ok(Repository { collapsed, ..repo })
+    }
+}
+
+async fn ensure_collapsed_column(conn: &Connection, path: &Path) -> Result<(), SwarmError> {
+    if has_column(conn, "repos", "collapsed").await? {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE repos ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0",
+        (),
+    )
+    .await
+    .map_err(|err| database_error(path, "add collapsed column", err))?;
+
+    Ok(())
+}
+
+async fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, SwarmError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).await?;
+    let mut rows = stmt.query(()).await?;
+
+    while let Some(row) = rows.next().await? {
+        if row.get::<String>(1)? == column {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn path_to_string(path: &Path) -> Result<&str, SwarmError> {
