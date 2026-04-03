@@ -17,8 +17,6 @@ Example: `github.com/penberg/swarm`
 `swarm repo` commands:
 - register a repository with `swarm`
 - sync a repository's local bare clone from the remote
-- collapse a repository so its workspaces stay hidden in the UI
-- expand a previously collapsed repository
 - remove a repository from `swarm`
 - list repositories known to `swarm`
 
