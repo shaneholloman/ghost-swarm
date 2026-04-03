@@ -13,9 +13,10 @@ use std::{
 
 use crate::{
     data::{
-        SessionEntry, WorkspaceEntry, WorkspaceGroup, close_session, create_session,
-        create_workspace, current_workspace_branch, load_workspace_groups, remove_workspace,
-        rename_workspace, sync_repository, workspace_head_path,
+        SessionEntry, WorkspaceEntry, WorkspaceGroup, close_session, collapse_repository,
+        create_session, create_workspace, current_workspace_branch, expand_repository,
+        load_workspace_groups, remove_workspace, rename_workspace, sync_repository,
+        workspace_head_path,
     },
     ghostty,
 };
@@ -55,6 +56,21 @@ window {
   color: #7a8698;
   font-size: 16px;
   font-weight: 500;
+}
+
+.repo-toggle {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: #7a8698;
+}
+
+.repo-toggle:hover {
+  background: rgba(126, 203, 255, 0.08);
+  color: #e7f3ff;
 }
 
 .repo-add:hover {
@@ -394,29 +410,33 @@ fn build_sidebar(
             &group.repo_label,
             &group.repo_canonical,
             group.repo_status.as_deref(),
+            group.collapsed,
         );
         sidebar_append_static_row(&list, &repo_row);
 
-        for workspace in &group.workspaces {
-            let is_editing = state
-                .editing_workspace
-                .borrow()
-                .as_ref()
-                .is_some_and(|editing| editing == &workspace_ref(workspace));
-            let is_selected = selected_workspace
-                .as_ref()
-                .is_some_and(|selected| selected.path == workspace.path);
-            let workspace_row = build_workspace_row(workspace, &state, is_editing, is_selected);
-            let row = workspace_row.row.clone();
-            if is_selected {
-                list.select_row(Some(&row));
+        if !group.collapsed {
+            for workspace in &group.workspaces {
+                let is_editing = state
+                    .editing_workspace
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|editing| editing == &workspace_ref(workspace));
+                let is_selected = selected_workspace
+                    .as_ref()
+                    .is_some_and(|selected| selected.path == workspace.path);
+                let workspace_row = build_workspace_row(workspace, &state, is_editing, is_selected);
+                let row = workspace_row.row.clone();
+                if is_selected {
+                    list.select_row(Some(&row));
+                }
+                rows.borrow_mut().push(workspace_row);
+                list.append(&row);
             }
-            rows.borrow_mut().push(workspace_row);
-            list.append(&row);
         }
     }
 
-    if rows.borrow().is_empty() {
+    let has_any_workspaces = groups.iter().any(|group| group.workspace_count > 0);
+    if !has_any_workspaces {
         let empty = Label::new(Some("No workspaces yet."));
         empty.set_xalign(0.0);
         empty.add_css_class("terminal-empty");
@@ -479,6 +499,7 @@ fn build_repo_row(
     repo_label: &str,
     repo_canonical: &str,
     repo_status: Option<&str>,
+    collapsed: bool,
 ) -> GtkBox {
     let row = GtkBox::new(Orientation::Horizontal, 0);
     row.set_halign(Align::Fill);
@@ -536,6 +557,30 @@ fn build_repo_row(
         });
     }
 
+    let toggle_button = Button::new();
+    toggle_button.set_valign(Align::Center);
+    toggle_button.add_css_class("repo-toggle");
+    toggle_button.set_tooltip_text(Some(if collapsed {
+        "Expand repository"
+    } else {
+        "Collapse repository"
+    }));
+    let toggle_icon = Image::from_icon_name(if collapsed {
+        "pan-end-symbolic"
+    } else {
+        "pan-down-symbolic"
+    });
+    toggle_icon.set_pixel_size(14);
+    toggle_button.set_child(Some(&toggle_icon));
+
+    {
+        let state = state.clone();
+        let repo_canonical = repo_canonical.to_string();
+        toggle_button.connect_clicked(move |_| {
+            toggle_repo_collapsed_and_refresh(&state, &repo_canonical, collapsed);
+        });
+    }
+
     let hover = EventControllerMotion::new();
     {
         let row = row.clone();
@@ -553,6 +598,7 @@ fn build_repo_row(
 
     row.append(&sync_button);
     row.append(&button);
+    row.append(&toggle_button);
     row
 }
 
@@ -710,6 +756,27 @@ fn sync_repo_and_refresh(state: &Rc<AppState>, repo_canonical: &str) {
         }
         Err(err) => {
             eprintln!("failed to sync repository: {err}");
+        }
+    }
+}
+
+fn toggle_repo_collapsed_and_refresh(state: &Rc<AppState>, repo_canonical: &str, collapsed: bool) {
+    let result = if collapsed {
+        expand_repository(repo_canonical)
+    } else {
+        collapse_repository(repo_canonical)
+    };
+
+    match result {
+        Ok(()) => {
+            *state.editing_workspace.borrow_mut() = None;
+            *state.selected_session.borrow_mut() = None;
+            schedule_refresh(state, None, None);
+        }
+        Err(err) => {
+            eprintln!("failed to toggle repository collapse: {err}");
+            let preferred_workspace = state.selected_workspace.borrow().clone();
+            schedule_refresh(state, preferred_workspace, None);
         }
     }
 }

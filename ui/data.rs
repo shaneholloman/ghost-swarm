@@ -51,32 +51,29 @@ pub fn load_workspace_groups() -> Result<Vec<WorkspaceGroup>, SwarmError> {
             let repo_label = repo.alias.clone().unwrap_or_else(|| repo.name.clone());
             let repo_canonical = repo.canonical();
             let repo_status = repo_sync_status(&repo_store, &repo);
-            let workspaces = workspace_store
-                .list(&repo_canonical)
-                .await?
-                .into_iter()
-                .map(|workspace| async {
-                    let workspace_ref = format!("{}:{}", workspace.repository, workspace.name);
-                    let sessions = session_store
-                        .list(Some(&workspace_ref))
-                        .await?
-                        .into_iter()
-                        .map(|session| SessionEntry {
-                            id: session.id,
-                            status: session.status,
-                            command: session.command.join(" "),
-                            log_path: session.log_path.display().to_string(),
-                            socket_path: session.socket_path.display().to_string(),
-                        })
-                        .collect::<Vec<_>>();
+            let workspaces = workspace_store.list(&repo_canonical).await?;
+            let workspaces = workspaces.into_iter().map(|workspace| async {
+                let workspace_ref = format!("{}:{}", workspace.repository, workspace.name);
+                let sessions = session_store
+                    .list(Some(&workspace_ref))
+                    .await?
+                    .into_iter()
+                    .map(|session| SessionEntry {
+                        id: session.id,
+                        status: session.status,
+                        command: session.command.join(" "),
+                        log_path: session.log_path.display().to_string(),
+                        socket_path: session.socket_path.display().to_string(),
+                    })
+                    .collect::<Vec<_>>();
 
-                    Ok::<WorkspaceEntry, SwarmError>(map_workspace(
-                        &repo_label,
-                        &repo_canonical,
-                        workspace,
-                        sessions,
-                    ))
-                });
+                Ok::<WorkspaceEntry, SwarmError>(map_workspace(
+                    &repo_label,
+                    &repo_canonical,
+                    workspace,
+                    sessions,
+                ))
+            });
             let mut workspace_entries = Vec::new();
             for workspace in workspaces {
                 workspace_entries.push(workspace.await?);
