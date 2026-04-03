@@ -371,6 +371,7 @@ fn build_repo_row(state: &Rc<AppState>, repo_label: &str, repo_canonical: &str) 
     let button = Button::with_label("+");
     button.set_valign(Align::Center);
     button.add_css_class("repo-add");
+    button.set_tooltip_text(Some("New workspace"));
 
     {
         let state = state.clone();
