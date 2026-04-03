@@ -294,7 +294,7 @@ fn build_ui(app: &Application) {
         selected_session: RefCell::new(None),
         branch_monitors: RefCell::new(Vec::new()),
     });
-    refresh_ui(&state, None);
+    refresh_ui(&state, None, None);
 
     window.present();
 }
@@ -307,7 +307,11 @@ struct AppState {
     branch_monitors: RefCell<Vec<FileMonitor>>,
 }
 
-fn refresh_ui(state: &Rc<AppState>, preferred_workspace: Option<String>) {
+fn refresh_ui(
+    state: &Rc<AppState>,
+    preferred_workspace: Option<String>,
+    preferred_session: Option<String>,
+) {
     state.branch_monitors.borrow_mut().clear();
     let groups = match load_workspace_groups() {
         Ok(groups) => groups,
@@ -327,7 +331,7 @@ fn refresh_ui(state: &Rc<AppState>, preferred_workspace: Option<String>) {
 
     let detail_widgets = DetailWidgets::new(state);
     if let Some(workspace) = selected_workspace.as_ref() {
-        detail_widgets.render_workspace(workspace, state);
+        detail_widgets.render_workspace(workspace, state, preferred_session.as_deref());
         *state.selected_workspace.borrow_mut() = Some(workspace_ref(workspace));
     } else {
         detail_widgets.render_empty();
@@ -349,10 +353,14 @@ fn refresh_ui(state: &Rc<AppState>, preferred_workspace: Option<String>) {
     state.window.set_child(Some(&shell));
 }
 
-fn schedule_refresh(state: &Rc<AppState>, preferred_workspace: Option<String>) {
+fn schedule_refresh(
+    state: &Rc<AppState>,
+    preferred_workspace: Option<String>,
+    preferred_session: Option<String>,
+) {
     let state = state.clone();
     glib::idle_add_local_once(move || {
-        refresh_ui(&state, preferred_workspace);
+        refresh_ui(&state, preferred_workspace, preferred_session);
     });
 }
 
@@ -443,10 +451,21 @@ fn build_sidebar(
             };
 
             if let Some(workspace) = selected_workspace {
-                let workspace_ref = workspace_ref(&workspace);
-                *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
-                *state.selected_session.borrow_mut() = None;
-                detail_widgets.render_workspace(&workspace, &state);
+                let next_workspace_ref = workspace_ref(&workspace);
+                let preserve_session = state
+                    .selected_workspace
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|selected| selected == &next_workspace_ref);
+                let preferred_session = if preserve_session {
+                    state.selected_session.borrow().clone()
+                } else {
+                    None
+                };
+
+                *state.selected_workspace.borrow_mut() = Some(next_workspace_ref);
+                *state.selected_session.borrow_mut() = preferred_session.clone();
+                detail_widgets.render_workspace(&workspace, &state, preferred_session.as_deref());
             }
         });
     }
@@ -642,9 +661,10 @@ fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, bran
 
     let label = branch.clone();
     let workspace_path = workspace.path.clone();
+    let session_count = workspace.sessions.len();
     monitor.connect_changed(
         move |_, _, _, _| match current_workspace_branch(&workspace_path) {
-            Ok(branch) => label.set_text(&branch),
+            Ok(branch) => label.set_text(&workspace_meta_text(&branch, session_count)),
             Err(err) => eprintln!("failed to refresh branch for {workspace_path}: {err}"),
         },
     );
@@ -673,7 +693,7 @@ fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
             *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
             *state.editing_workspace.borrow_mut() = Some(workspace_ref.clone());
             *state.selected_session.borrow_mut() = None;
-            schedule_refresh(state, Some(workspace_ref));
+            schedule_refresh(state, Some(workspace_ref), None);
         }
         Err(err) => {
             eprintln!("failed to create workspace: {err}");
@@ -761,7 +781,7 @@ fn commit_workspace_rename(state: &Rc<AppState>, current_workspace_ref: &str, ne
     *state.editing_workspace.borrow_mut() = None;
 
     if next_name.is_empty() {
-        schedule_refresh(state, Some(current_workspace_ref.to_string()));
+        schedule_refresh(state, Some(current_workspace_ref.to_string()), None);
         return;
     }
 
@@ -770,12 +790,12 @@ fn commit_workspace_rename(state: &Rc<AppState>, current_workspace_ref: &str, ne
             let next_workspace_ref = workspace_ref(&workspace);
             *state.selected_workspace.borrow_mut() = Some(next_workspace_ref.clone());
             *state.selected_session.borrow_mut() = None;
-            schedule_refresh(state, Some(next_workspace_ref));
+            schedule_refresh(state, Some(next_workspace_ref), None);
         }
         Err(err) => {
             eprintln!("failed to rename workspace: {err}");
             *state.editing_workspace.borrow_mut() = Some(current_workspace_ref.to_string());
-            schedule_refresh(state, Some(current_workspace_ref.to_string()));
+            schedule_refresh(state, Some(current_workspace_ref.to_string()), None);
         }
     }
 }
@@ -873,7 +893,12 @@ impl DetailWidgets {
         clear_stack(&self.session_stack);
     }
 
-    fn render_workspace(&self, workspace: &WorkspaceEntry, state: &Rc<AppState>) {
+    fn render_workspace(
+        &self,
+        workspace: &WorkspaceEntry,
+        state: &Rc<AppState>,
+        preferred_session: Option<&str>,
+    ) {
         clear_box(&self.session_toolbar);
         clear_stack(&self.session_stack);
 
@@ -911,10 +936,9 @@ impl DetailWidgets {
                 .add_titled(&host, Some(&session.id), &session.id);
         }
 
-        let selected_session = state
-            .selected_session
-            .borrow()
-            .clone()
+        let selected_session = preferred_session
+            .map(str::to_string)
+            .or_else(|| state.selected_session.borrow().clone())
             .filter(|selected| {
                 workspace
                     .sessions
@@ -1030,7 +1054,11 @@ fn create_and_select_session(state: &Rc<AppState>, workspace_ref: &str) {
         Ok(session) => {
             *state.selected_workspace.borrow_mut() = Some(workspace_ref.to_string());
             *state.selected_session.borrow_mut() = Some(session.id.clone());
-            schedule_refresh(state, Some(workspace_ref.to_string()));
+            schedule_refresh(
+                state,
+                Some(workspace_ref.to_string()),
+                Some(session.id.clone()),
+            );
         }
         Err(err) => {
             eprintln!("failed to create session: {err}");
@@ -1053,7 +1081,11 @@ fn close_specific_session(
         Ok(_) => {
             *state.selected_workspace.borrow_mut() = Some(workspace_ref.to_string());
             *state.selected_session.borrow_mut() = next_selected;
-            schedule_refresh(state, Some(workspace_ref.to_string()));
+            schedule_refresh(
+                state,
+                Some(workspace_ref.to_string()),
+                state.selected_session.borrow().clone(),
+            );
         }
         Err(err) => {
             eprintln!("failed to close session: {err}");
