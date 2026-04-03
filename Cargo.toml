@@ -2,6 +2,7 @@
 name = "swarm"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/penberg/swarm"
 
 [lib]
 path = "lib.rs"
@@ -35,3 +36,8 @@ required-features = ["ui"]
 
 [patch.crates-io]
 libghostty-vt-sys = { path = "vendor-libghostty-vt-sys" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
