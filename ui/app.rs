@@ -21,8 +21,8 @@ use crate::{
     data::{
         SessionEntry, WorkspaceEntry, WorkspaceGroup, add_repository, clone_workspace,
         close_session, collapse_repository, create_session, create_workspace,
-        current_workspace_branch, expand_repository, load_workspace_groups, remove_workspace,
-        rename_workspace, sync_repository, workspace_head_path,
+        current_workspace_branch, expand_repository, load_session_programs, load_workspace_groups,
+        remove_workspace, rename_workspace, sync_repository, workspace_head_path,
     },
     ghostty,
 };
@@ -1801,6 +1801,8 @@ impl DetailWidgets {
         if workspace.sessions.is_empty() {
             let empty = ghostty::terminal_host(&SessionEntry {
                 id: "No sessions".to_string(),
+                pid: None,
+                program: "No sessions".to_string(),
                 status: "idle".to_string(),
                 command: "Create or attach a session to mount Ghostty here.".to_string(),
                 log_path: String::new(),
@@ -1814,7 +1816,7 @@ impl DetailWidgets {
         for session in &workspace.sessions {
             let host = ghostty::terminal_host(session);
             self.session_stack
-                .add_titled(&host, Some(&session.id), &session.id);
+                .add_titled(&host, Some(&session.id), &session.program);
         }
 
         let selected_session = preferred_session
@@ -1841,13 +1843,14 @@ impl DetailWidgets {
                 &self.session_tabs,
                 &workspace_ref,
                 &session_ids,
-                &session.id,
+                session,
                 session.id == selected_session,
                 &self.session_stack,
             );
             self.session_tabs.append(&tab);
         }
         sync_session_tab_active_state(&self.session_tabs, Some(&selected_session));
+        install_session_tab_refresh(&self.session_tabs, &workspace_ref);
     }
 }
 
@@ -1899,23 +1902,25 @@ fn build_session_tab(
     session_tabs: &GtkBox,
     workspace_ref: &str,
     session_ids: &[String],
-    session_id: &str,
+    session: &SessionEntry,
     active: bool,
     session_stack: &Stack,
 ) -> GtkBox {
     let tab = GtkBox::new(Orientation::Horizontal, 0);
     tab.add_css_class("session-tab");
-    tab.set_widget_name(session_id);
+    tab.set_widget_name(&session.id);
+    tab.set_tooltip_text(Some(&session.id));
     if active {
         tab.add_css_class("session-tab-active");
     }
 
-    let select_button = Button::with_label(session_id);
+    let select_button = Button::with_label(&session.program);
+    select_button.set_tooltip_text(Some(&session.id));
     select_button.set_valign(Align::Center);
     select_button.add_css_class("session-tab-select");
     {
         let state = state.clone();
-        let session_id = session_id.to_string();
+        let session_id = session.id.clone();
         let session_tabs = session_tabs.clone();
         let session_stack = session_stack.clone();
         select_button.connect_clicked(move |_| {
@@ -1933,7 +1938,7 @@ fn build_session_tab(
         let state = state.clone();
         let workspace_ref = workspace_ref.to_string();
         let session_ids = session_ids.to_vec();
-        let session_id = session_id.to_string();
+        let session_id = session.id.clone();
         close_button.connect_clicked(move |_| {
             close_specific_session(&state, &workspace_ref, &session_ids, &session_id);
         });
@@ -1942,6 +1947,42 @@ fn build_session_tab(
     tab.append(&select_button);
     tab.append(&close_button);
     tab
+}
+
+fn install_session_tab_refresh(session_tabs: &GtkBox, workspace_ref: &str) {
+    let session_tabs = session_tabs.downgrade();
+    let workspace_ref = workspace_ref.to_string();
+    glib::timeout_add_local(Duration::from_secs(1), move || {
+        let Some(session_tabs) = session_tabs.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if !session_tabs.is_visible() {
+            return glib::ControlFlow::Continue;
+        }
+        if let Ok(programs) = load_session_programs(&workspace_ref) {
+            sync_session_tab_labels(&session_tabs, &programs);
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+fn sync_session_tab_labels(session_tabs: &GtkBox, programs: &[(String, String)]) {
+    let mut child = session_tabs.first_child();
+    while let Some(widget) = child {
+        let next = widget.next_sibling();
+        let session_id = widget.widget_name().to_string();
+        if let Some((_, program)) = programs.iter().find(|(id, _)| id == &session_id) {
+            if let Some(button) = widget
+                .first_child()
+                .and_then(|child| child.downcast::<Button>().ok())
+            {
+                if button.label().as_deref() != Some(program.as_str()) {
+                    button.set_label(program);
+                }
+            }
+        }
+        child = next;
+    }
 }
 
 fn create_and_select_session(state: &Rc<AppState>, workspace_id: &str) {
