@@ -1,7 +1,8 @@
 use gtk::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry,
-    EventControllerMotion, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Spinner,
-    STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, SelectionMode, Stack, Widget, gdk,
+    EventControllerKey, EventControllerMotion, Image, Label, ListBox, ListBoxRow, Orientation,
+    PolicyType, PropagationPhase, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow,
+    SelectionMode, Spinner, Stack, Widget, gdk,
     gio::{self, FileMonitor, FileMonitorFlags},
     glib,
     prelude::*,
@@ -379,6 +380,7 @@ fn build_ui(app: &Application) {
         branch_monitors: RefCell::new(Vec::new()),
         syncing_repositories: RefCell::new(HashSet::new()),
     });
+    install_session_cycle_shortcuts(&window, &state);
     refresh_ui(&state, None, None);
 
     window.present();
@@ -457,6 +459,70 @@ fn schedule_refresh(
     glib::idle_add_local_once(move || {
         refresh_ui(&state, preferred_workspace, preferred_session);
     });
+}
+
+fn install_session_cycle_shortcuts(window: &ApplicationWindow, state: &Rc<AppState>) {
+    let controller = EventControllerKey::new();
+    controller.set_propagation_phase(PropagationPhase::Capture);
+    {
+        let state = state.clone();
+        controller.connect_key_pressed(move |_controller, key, _keycode, modifiers| {
+            let control = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
+            if !control {
+                return glib::Propagation::Proceed;
+            }
+
+            let direction = match key {
+                gdk::Key::Page_Up => -1,
+                gdk::Key::Page_Down => 1,
+                _ => return glib::Propagation::Proceed,
+            };
+
+            cycle_selected_session(&state, direction);
+            glib::Propagation::Stop
+        });
+    }
+    window.add_controller(controller);
+}
+
+fn cycle_selected_session(state: &Rc<AppState>, direction: isize) {
+    let Some(workspace_ref) = state.selected_workspace.borrow().clone() else {
+        return;
+    };
+
+    let groups = match load_workspace_groups() {
+        Ok(groups) => groups,
+        Err(err) => {
+            eprintln!("failed to load workspaces: {err}");
+            return;
+        }
+    };
+
+    let Some(workspace) = find_workspace_by_ref(&groups, &workspace_ref) else {
+        return;
+    };
+
+    if workspace.sessions.len() < 2 {
+        return;
+    }
+
+    let current_index = state
+        .selected_session
+        .borrow()
+        .as_ref()
+        .and_then(|selected| {
+            workspace
+                .sessions
+                .iter()
+                .position(|session| session.id == *selected)
+        })
+        .unwrap_or(0);
+    let session_count = workspace.sessions.len() as isize;
+    let next_index = (current_index as isize + direction).rem_euclid(session_count) as usize;
+    let next_session = workspace.sessions[next_index].id.clone();
+
+    *state.selected_session.borrow_mut() = Some(next_session.clone());
+    schedule_refresh(state, Some(workspace_ref), Some(next_session));
 }
 
 fn build_sidebar(
