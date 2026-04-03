@@ -30,6 +30,7 @@ Each workspace belongs to exactly one repository and is backed by a git worktree
 
 `swarm workspace` commands:
 - create a new local worktree for a repository
+- clone a workspace into a new local worktree
 - list workspaces for a repository
 - inspect workspace metadata
 - remove a workspace
@@ -343,6 +344,44 @@ swarm ws create github.com/penberg/swarm review-docs
 
 ```text
 Created workspace main for swarm
+Created session 01JSESSIONEXAMPLE
+```
+
+### `swarm workspace clone`
+
+Clone a workspace into a new workspace.
+
+#### Usage
+
+```text
+swarm workspace clone <workspace> <name>
+swarm ws clone <workspace> <name>
+```
+
+#### Arguments
+
+- `<workspace>`: Source workspace reference.
+- `<name>`: New workspace name.
+
+#### Behavior
+
+- Resolves the source workspace.
+- Creates a new git worktree under `repos/<host>/<owner>/<name>/workspaces/<workspace-name>/`.
+- Creates a new branch named `<name>` from the source workspace's current committed `HEAD`.
+- Starts a default session for the cloned workspace using the user's login shell.
+- Rejects duplicate workspace names within the same repository.
+
+#### Examples
+
+```text
+swarm workspace clone swarm:main feature-x
+swarm ws clone swarm/bugfix bugfix-copy
+```
+
+#### Expected Output
+
+```text
+Cloned workspace swarm:main to feature-x for swarm
 Created session 01JSESSIONEXAMPLE
 ```
 

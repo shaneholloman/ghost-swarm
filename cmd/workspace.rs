@@ -22,6 +22,19 @@ pub async fn run(cmd: WorkspaceCommand) -> Result<(), SwarmError> {
             );
             println!("Created session {}", session.id);
         }
+        WorkspaceSubcommand::Clone { workspace, name } => {
+            let cloned = store.clone(&workspace, &name).await?;
+            let workspace_ref = format!("{}:{}", cloned.repository, cloned.name);
+            let session_store = SessionStore::open().await?;
+            let session = session_store
+                .create(&workspace_ref, &default_session_command())
+                .await?;
+            println!(
+                "Cloned workspace {} to {} for {}",
+                workspace, cloned.name, cloned.repository_alias
+            );
+            println!("Created session {}", session.id);
+        }
         WorkspaceSubcommand::List { repository, json } => {
             let workspaces = store.list(&repository).await?;
 

@@ -107,6 +107,72 @@ impl WorkspaceStore {
         })
     }
 
+    pub async fn clone(&self, workspace: &str, name: &str) -> Result<Workspace, SwarmError> {
+        let reference = parse_workspace_reference(workspace)?;
+        let repo = self
+            .resolve_repo_from_workspace_reference(&reference)
+            .await?;
+        let db = self.open_repo_db(&repo).await?;
+        let source = self
+            .find_workspace(&db, &repo, &reference.workspace)
+            .await?
+            .ok_or_else(|| SwarmError::WorkspaceNotFound(workspace.to_string()))?;
+        let workspace_name = resolve_workspace_name(Some(name), &source.branch)?;
+
+        if self
+            .find_workspace(&db, &repo, &workspace_name)
+            .await?
+            .is_some()
+        {
+            return Err(SwarmError::DuplicateWorkspace(format!(
+                "{}:{}",
+                repo.alias.as_deref().unwrap_or(&repo.name),
+                workspace_name
+            )));
+        }
+
+        let workspaces_dir = self.repos.workspaces_dir(&repo);
+        fs::create_dir_all(&workspaces_dir)?;
+        let workspace_path = workspaces_dir.join(&workspace_name);
+
+        if workspace_path.exists() {
+            return Err(SwarmError::DuplicateWorkspace(format!(
+                "{}:{}",
+                repo.alias.as_deref().unwrap_or(&repo.name),
+                workspace_name
+            )));
+        }
+
+        let bare_repo_path = self.repos.bare_repo_path(&repo);
+        let branch = self.materialize_cloned_worktree(
+            &bare_repo_path,
+            &source,
+            &workspace_path,
+            &workspace_name,
+        )?;
+        let created_at = unix_timestamp();
+
+        db.execute(
+            "INSERT INTO workspaces (name, branch, path, created_at) VALUES (?1, ?2, ?3, ?4)",
+            (
+                workspace_name.as_str(),
+                branch.as_str(),
+                path_to_string(&workspace_path)?,
+                created_at,
+            ),
+        )
+        .await?;
+
+        Ok(Workspace {
+            repository: repo.canonical(),
+            repository_alias: repo.alias.clone().unwrap_or_else(|| repo.name.clone()),
+            name: workspace_name,
+            branch,
+            path: workspace_path,
+            created_at,
+        })
+    }
+
     pub async fn list(&self, repository: &str) -> Result<Vec<Workspace>, SwarmError> {
         let repo = self
             .repos
@@ -425,6 +491,27 @@ impl WorkspaceStore {
 
         Ok(branch)
     }
+
+    fn materialize_cloned_worktree(
+        &self,
+        bare_repo_path: &Path,
+        source: &Workspace,
+        workspace_path: &Path,
+        workspace_name: &str,
+    ) -> Result<String, SwarmError> {
+        let source_head = git_rev_parse(&source.path, "HEAD")?;
+        let args = build_clone_worktree_add_args(
+            bare_repo_path,
+            workspace_path,
+            workspace_name,
+            &source_head,
+        )?;
+        let branch = workspace_name.to_string();
+
+        run_git(workspace_path.parent(), args)?;
+
+        Ok(branch)
+    }
 }
 
 pub fn parse_workspace_reference(input: &str) -> Result<WorkspaceReference, SwarmError> {
@@ -482,6 +569,23 @@ fn build_worktree_add_args(
     Ok(args)
 }
 
+fn build_clone_worktree_add_args(
+    bare_repo_path: &Path,
+    workspace_path: &Path,
+    workspace_name: &str,
+    source_head: &str,
+) -> Result<Vec<String>, SwarmError> {
+    Ok(vec![
+        format!("--git-dir={}", bare_repo_path.display()),
+        "worktree".to_string(),
+        "add".to_string(),
+        "-b".to_string(),
+        workspace_name.to_string(),
+        workspace_path.display().to_string(),
+        source_head.to_string(),
+    ])
+}
+
 fn git_current_branch(path: &Path) -> Result<String, SwarmError> {
     let branch = run_git(Some(path), ["branch", "--show-current"])?;
     if !branch.is_empty() {
@@ -489,6 +593,10 @@ fn git_current_branch(path: &Path) -> Result<String, SwarmError> {
     }
 
     run_git(Some(path), ["rev-parse", "--short", "HEAD"])
+}
+
+fn git_rev_parse(path: &Path, revision: &str) -> Result<String, SwarmError> {
+    run_git(Some(path), ["rev-parse", revision])
 }
 
 fn run_git<I, S>(cwd: Option<&Path>, args: I) -> Result<String, SwarmError>
@@ -660,7 +768,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{build_worktree_add_args, render_git_failure, run_git};
+    use super::{
+        build_clone_worktree_add_args, build_worktree_add_args, render_git_failure, run_git,
+    };
 
     #[test]
     fn default_branch_workspace_is_reset_to_origin_tip() {
@@ -734,6 +844,33 @@ mod tests {
                 "existing".to_string(),
                 workspace_path.display().to_string(),
                 "refs/remotes/origin/main".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cloned_workspace_branches_from_source_head() {
+        let bare_repo_path = create_bare_repo("main");
+        let workspace_path = PathBuf::from("/tmp/swarm-test-clone");
+
+        let args = build_clone_worktree_add_args(
+            &bare_repo_path,
+            &workspace_path,
+            "feature-copy",
+            "abc123def456",
+        )
+        .unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                format!("--git-dir={}", bare_repo_path.display()),
+                "worktree".to_string(),
+                "add".to_string(),
+                "-b".to_string(),
+                "feature-copy".to_string(),
+                workspace_path.display().to_string(),
+                "abc123def456".to_string(),
             ]
         );
     }

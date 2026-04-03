@@ -54,6 +54,10 @@ pub enum WorkspaceSubcommand {
         repository: String,
         name: Option<String>,
     },
+    Clone {
+        workspace: String,
+        name: String,
+    },
     List {
         repository: String,
         #[arg(long)]
