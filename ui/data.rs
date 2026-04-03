@@ -2,11 +2,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, SystemTime},
 };
-
 use swarm::{
     SwarmError,
-    repos::RepositoryStore,
+    repos::{Repository, RepositoryStore},
     sessions::{SessionStore, default_session_command},
     workspaces::{Workspace, WorkspaceStore},
 };
@@ -15,6 +15,7 @@ use swarm::{
 pub struct WorkspaceGroup {
     pub repo_label: String,
     pub repo_canonical: String,
+    pub repo_status: Option<String>,
     pub workspaces: Vec<WorkspaceEntry>,
 }
 
@@ -49,6 +50,7 @@ pub fn load_workspace_groups() -> Result<Vec<WorkspaceGroup>, SwarmError> {
         for repo in repos {
             let repo_label = repo.alias.clone().unwrap_or_else(|| repo.name.clone());
             let repo_canonical = repo.canonical();
+            let repo_status = repo_sync_status(&repo_store, &repo);
             let workspaces = workspace_store
                 .list(&repo_canonical)
                 .await?
@@ -83,6 +85,7 @@ pub fn load_workspace_groups() -> Result<Vec<WorkspaceGroup>, SwarmError> {
             groups.push(WorkspaceGroup {
                 repo_label,
                 repo_canonical,
+                repo_status,
                 workspaces: workspace_entries,
             });
         }
@@ -132,6 +135,15 @@ pub fn create_workspace(
             workspace,
             sessions,
         ))
+    })
+}
+
+pub fn sync_repository(repository: &str) -> Result<(), SwarmError> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let repo_store = RepositoryStore::open().await?;
+        repo_store.sync(repository).await?;
+        Ok(())
     })
 }
 
@@ -267,6 +279,77 @@ fn map_workspace(
         branch: workspace.branch,
         path: workspace.path.display().to_string(),
         sessions,
+    }
+}
+
+fn repo_sync_status(repo_store: &RepositoryStore, repo: &Repository) -> Option<String> {
+    let bare_repo_path = repo_store.bare_repo_path(repo);
+    let timestamp = [
+        bare_repo_path.join("FETCH_HEAD"),
+        bare_repo_path.join("HEAD"),
+        bare_repo_path
+            .join("refs")
+            .join("remotes")
+            .join("origin")
+            .join("HEAD"),
+    ]
+    .into_iter()
+    .find_map(file_modified_time)?;
+
+    Some(format_relative_sync_time(timestamp))
+}
+
+fn file_modified_time(path: PathBuf) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+fn format_relative_sync_time(timestamp: SystemTime) -> String {
+    let Ok(elapsed) = SystemTime::now().duration_since(timestamp) else {
+        return "just now".to_string();
+    };
+
+    format_elapsed(elapsed)
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        return "just now".to_string();
+    }
+
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return pluralize(minutes, "minute");
+    }
+
+    let hours = minutes / 60;
+    if hours < 24 {
+        return pluralize(hours, "hour");
+    }
+
+    let days = hours / 24;
+    if days < 7 {
+        return pluralize(days, "day");
+    }
+
+    let weeks = days / 7;
+    if weeks < 5 {
+        return pluralize(weeks, "week");
+    }
+
+    let months = days / 30;
+    if months < 12 {
+        return pluralize(months.max(1), "month");
+    }
+
+    pluralize((days / 365).max(1), "year")
+}
+
+fn pluralize(value: u64, unit: &str) -> String {
+    if value == 1 {
+        format!("1 {unit} ago")
+    } else {
+        format!("{value} {unit}s ago")
     }
 }
 
