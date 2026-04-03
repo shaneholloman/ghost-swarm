@@ -240,6 +240,7 @@ impl RepositoryStore {
     pub fn sync_repo(&self, repo: &Repository) -> Result<(), SwarmError> {
         let repo_dir = self.paths.repo_dir(repo);
         let bare_repo_path = self.bare_repo_path(repo);
+        let remote_url = repo.remote_url();
 
         fs::create_dir_all(&repo_dir)?;
 
@@ -251,23 +252,53 @@ impl RepositoryStore {
             run_git(
                 Some(&repo_dir),
                 [
-                    "clone".to_string(),
+                    "init".to_string(),
                     "--bare".to_string(),
-                    repo.remote_url(),
                     bare_repo_path.display().to_string(),
                 ],
             )?;
-        } else {
             run_git(
                 Some(&repo_dir),
                 [
                     format!("--git-dir={}", bare_repo_path.display()),
-                    "fetch".to_string(),
-                    "--all".to_string(),
-                    "--prune".to_string(),
+                    "remote".to_string(),
+                    "add".to_string(),
+                    "origin".to_string(),
+                    remote_url.clone(),
                 ],
             )?;
         }
+
+        run_git(
+            Some(&repo_dir),
+            [
+                format!("--git-dir={}", bare_repo_path.display()),
+                "remote".to_string(),
+                "set-url".to_string(),
+                "origin".to_string(),
+                remote_url,
+            ],
+        )?;
+        run_git(
+            Some(&repo_dir),
+            [
+                format!("--git-dir={}", bare_repo_path.display()),
+                "fetch".to_string(),
+                "origin".to_string(),
+                "--prune".to_string(),
+                "+refs/heads/*:refs/remotes/origin/*".to_string(),
+            ],
+        )?;
+        run_git(
+            Some(&repo_dir),
+            [
+                format!("--git-dir={}", bare_repo_path.display()),
+                "remote".to_string(),
+                "set-head".to_string(),
+                "origin".to_string(),
+                "--auto".to_string(),
+            ],
+        )?;
 
         Ok(())
     }

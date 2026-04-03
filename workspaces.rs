@@ -369,11 +369,15 @@ impl WorkspaceStore {
                 format!("--git-dir={}", bare_repo_path.display()),
                 "symbolic-ref".to_string(),
                 "--short".to_string(),
-                "HEAD".to_string(),
+                "refs/remotes/origin/HEAD".to_string(),
             ],
         )?;
 
-        Ok(head.trim().to_string())
+        Ok(head
+            .trim()
+            .strip_prefix("origin/")
+            .unwrap_or(head.trim())
+            .to_string())
     }
 
     fn materialize_worktree(
@@ -383,24 +387,13 @@ impl WorkspaceStore {
         workspace_name: &str,
         default_branch: &str,
     ) -> Result<String, SwarmError> {
-        let branch_exists = git_branch_exists(bare_repo_path, workspace_name)?;
-
-        let mut args = vec![
-            format!("--git-dir={}", bare_repo_path.display()),
-            "worktree".to_string(),
-            "add".to_string(),
-            workspace_path.display().to_string(),
-        ];
-
-        let branch = if branch_exists || workspace_name == default_branch {
-            args.push(workspace_name.to_string());
-            workspace_name.to_string()
-        } else {
-            args.push("-b".to_string());
-            args.push(workspace_name.to_string());
-            args.push(default_branch.to_string());
-            workspace_name.to_string()
-        };
+        let args = build_worktree_add_args(
+            bare_repo_path,
+            workspace_path,
+            workspace_name,
+            default_branch,
+        )?;
+        let branch = workspace_name.to_string();
 
         run_git(workspace_path.parent(), args)?;
 
@@ -443,26 +436,24 @@ fn resolve_workspace_name(name: Option<&str>, default_branch: &str) -> Result<St
     Ok(workspace_name.to_string())
 }
 
-fn git_branch_exists(bare_repo_path: &Path, branch: &str) -> Result<bool, SwarmError> {
-    let output = Command::new("git")
-        .arg(format!("--git-dir={}", bare_repo_path.display()))
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ])
-        .output()?;
+fn build_worktree_add_args(
+    bare_repo_path: &Path,
+    workspace_path: &Path,
+    workspace_name: &str,
+    default_branch: &str,
+) -> Result<Vec<String>, SwarmError> {
+    let mut args = vec![
+        format!("--git-dir={}", bare_repo_path.display()),
+        "worktree".to_string(),
+        "add".to_string(),
+        "-B".to_string(),
+        workspace_name.to_string(),
+        workspace_path.display().to_string(),
+    ];
+    let upstream_branch = format!("refs/remotes/origin/{default_branch}");
+    args.push(upstream_branch);
 
-    if output.status.success() {
-        return Ok(true);
-    }
-
-    if output.status.code() == Some(1) {
-        return Ok(false);
-    }
-
-    Err(SwarmError::Git(render_git_failure(output)))
+    Ok(args)
 }
 
 fn run_git<I, S>(cwd: Option<&Path>, args: I) -> Result<String, SwarmError>
@@ -623,4 +614,180 @@ pub async fn migrate_repo_db(conn: &Connection, path: &Path) -> Result<(), Swarm
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{build_worktree_add_args, render_git_failure, run_git};
+
+    #[test]
+    fn default_branch_workspace_is_reset_to_origin_tip() {
+        let bare_repo_path = create_bare_repo("main");
+        let workspace_path = PathBuf::from("/tmp/swarm-test-main");
+
+        let args =
+            build_worktree_add_args(&bare_repo_path, &workspace_path, "main", "main").unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                format!("--git-dir={}", bare_repo_path.display()),
+                "worktree".to_string(),
+                "add".to_string(),
+                "-B".to_string(),
+                "main".to_string(),
+                workspace_path.display().to_string(),
+                "refs/remotes/origin/main".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn new_workspace_branches_from_origin_default_branch() {
+        let bare_repo_path = create_bare_repo("main");
+        let workspace_path = PathBuf::from("/tmp/swarm-test-feature");
+
+        let args =
+            build_worktree_add_args(&bare_repo_path, &workspace_path, "feature", "main").unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                format!("--git-dir={}", bare_repo_path.display()),
+                "worktree".to_string(),
+                "add".to_string(),
+                "-B".to_string(),
+                "feature".to_string(),
+                workspace_path.display().to_string(),
+                "refs/remotes/origin/main".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn orphan_workspace_branch_is_reset_to_origin_default_branch() {
+        let bare_repo_path = create_bare_repo("main");
+        let workspace_path = PathBuf::from("/tmp/swarm-test-existing");
+        run_git(
+            None,
+            [
+                format!("--git-dir={}", bare_repo_path.display()),
+                "branch".to_string(),
+                "existing".to_string(),
+                "refs/remotes/origin/main".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let args =
+            build_worktree_add_args(&bare_repo_path, &workspace_path, "existing", "main").unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                format!("--git-dir={}", bare_repo_path.display()),
+                "worktree".to_string(),
+                "add".to_string(),
+                "-B".to_string(),
+                "existing".to_string(),
+                workspace_path.display().to_string(),
+                "refs/remotes/origin/main".to_string(),
+            ]
+        );
+    }
+
+    fn create_bare_repo(default_branch: &str) -> PathBuf {
+        let repo_path = unique_temp_path("swarm-workspaces-test");
+        fs::create_dir_all(&repo_path).unwrap();
+        run_git(
+            None,
+            [
+                "init".to_string(),
+                "--bare".to_string(),
+                repo_path.display().to_string(),
+            ],
+        )
+        .unwrap();
+        let commit = run_git(
+            None,
+            [
+                format!("--git-dir={}", repo_path.display()),
+                "commit-tree".to_string(),
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string(),
+                "-m".to_string(),
+                "init".to_string(),
+            ],
+        )
+        .or_else(|_| {
+            run_git_with_env(
+                [
+                    ("GIT_AUTHOR_NAME", "Swarm Tests"),
+                    ("GIT_AUTHOR_EMAIL", "swarm-tests@example.com"),
+                    ("GIT_COMMITTER_NAME", "Swarm Tests"),
+                    ("GIT_COMMITTER_EMAIL", "swarm-tests@example.com"),
+                ],
+                [
+                    format!("--git-dir={}", repo_path.display()),
+                    "commit-tree".to_string(),
+                    "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string(),
+                    "-m".to_string(),
+                    "init".to_string(),
+                ],
+            )
+        })
+        .unwrap();
+        run_git(
+            None,
+            [
+                format!("--git-dir={}", repo_path.display()),
+                "update-ref".to_string(),
+                format!("refs/remotes/origin/{default_branch}"),
+                commit,
+            ],
+        )
+        .unwrap();
+
+        repo_path
+    }
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nonce}"))
+    }
+
+    fn run_git_with_env<I, S, E, K, V>(envs: E, args: I) -> Result<String, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        E: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut cmd = Command::new("git");
+
+        for (key, value) in envs {
+            cmd.env(key.as_ref(), value.as_ref());
+        }
+
+        for arg in args {
+            cmd.arg(arg.as_ref());
+        }
+
+        let output = cmd.output().map_err(|err| err.to_string())?;
+        if !output.status.success() {
+            return Err(render_git_failure(output));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
 }
