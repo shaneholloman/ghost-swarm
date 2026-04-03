@@ -1,7 +1,9 @@
 use gtk::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Label,
     ListBox, ListBoxRow, Orientation, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION,
-    ScrolledWindow, SelectionMode, Stack, Widget, gdk, glib, prelude::*,
+    ScrolledWindow, SelectionMode, Stack, Widget, gdk,
+    gio::{self, FileMonitor, FileMonitorFlags},
+    glib, prelude::*,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -11,7 +13,8 @@ use std::{
 use crate::{
     data::{
         SessionEntry, WorkspaceEntry, WorkspaceGroup, close_session, create_session,
-        create_workspace, load_workspace_groups, rename_workspace,
+        create_workspace, current_workspace_branch, load_workspace_groups, rename_workspace,
+        workspace_head_path,
     },
     ghostty,
 };
@@ -215,6 +218,7 @@ fn build_ui(app: &Application) {
         selected_workspace: RefCell::new(None),
         editing_workspace: RefCell::new(None),
         selected_session: RefCell::new(None),
+        branch_monitors: RefCell::new(Vec::new()),
     });
     refresh_ui(&state, None);
 
@@ -226,9 +230,11 @@ struct AppState {
     selected_workspace: RefCell<Option<String>>,
     editing_workspace: RefCell<Option<String>>,
     selected_session: RefCell<Option<String>>,
+    branch_monitors: RefCell<Vec<FileMonitor>>,
 }
 
 fn refresh_ui(state: &Rc<AppState>, preferred_workspace: Option<String>) {
+    state.branch_monitors.borrow_mut().clear();
     let groups = match load_workspace_groups() {
         Ok(groups) => groups,
         Err(err) => {
@@ -417,17 +423,49 @@ fn build_workspace_row(
         card.append(&name);
     }
 
-    let meta = Label::new(Some(&format!(
-        "{}  •  {} sessions",
-        workspace.branch,
-        workspace.sessions.len()
+    let meta = Label::new(Some(&workspace_meta_text(
+        &workspace.branch,
+        workspace.sessions.len(),
     )));
     meta.set_xalign(0.0);
     meta.add_css_class("workspace-meta");
+    install_branch_monitor(state, workspace, &meta);
 
     card.append(&meta);
     row.set_child(Some(&card));
     row
+}
+
+fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, meta: &Label) {
+    let head_path = match workspace_head_path(&workspace.path) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("failed to resolve HEAD for {}: {err}", workspace.path);
+            return;
+        }
+    };
+
+    let monitor = match gio::File::for_path(head_path)
+        .monitor_file(FileMonitorFlags::NONE, None::<&gio::Cancellable>)
+    {
+        Ok(monitor) => monitor,
+        Err(err) => {
+            eprintln!("failed to watch workspace branch for {}: {err}", workspace.path);
+            return;
+        }
+    };
+
+    let label = meta.clone();
+    let workspace_path = workspace.path.clone();
+    let session_count = workspace.sessions.len();
+    monitor.connect_changed(move |_, _, _, _| {
+        match current_workspace_branch(&workspace_path) {
+            Ok(branch) => label.set_text(&workspace_meta_text(&branch, session_count)),
+            Err(err) => eprintln!("failed to refresh branch for {workspace_path}: {err}"),
+        }
+    });
+
+    state.branch_monitors.borrow_mut().push(monitor);
 }
 
 fn build_content(detail_container: GtkBox) -> GtkBox {
@@ -558,6 +596,10 @@ fn next_workspace_placeholder() -> String {
     }
 
     "new".to_string()
+}
+
+fn workspace_meta_text(branch: &str, session_count: usize) -> String {
+    format!("{branch}  •  {session_count} sessions")
 }
 
 #[derive(Clone)]

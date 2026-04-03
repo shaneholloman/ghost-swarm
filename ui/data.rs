@@ -1,3 +1,9 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
 use swarm::{
     SwarmError,
     repos::RepositoryStore,
@@ -198,6 +204,28 @@ pub fn close_session(session_id: &str) -> Result<SessionEntry, SwarmError> {
     })
 }
 
+pub fn current_workspace_branch(path: &str) -> Result<String, SwarmError> {
+    let path = Path::new(path);
+    let branch = run_git(path, ["branch", "--show-current"])?;
+    if !branch.is_empty() {
+        return Ok(branch);
+    }
+
+    run_git(path, ["rev-parse", "--short", "HEAD"])
+}
+
+pub fn workspace_head_path(path: &str) -> Result<PathBuf, SwarmError> {
+    let workspace_path = Path::new(path);
+    let git_path = workspace_path.join(".git");
+    let git_dir = if git_path.is_dir() {
+        git_path
+    } else {
+        resolve_gitdir_file(&git_path, workspace_path)?
+    };
+
+    Ok(git_dir.join("HEAD"))
+}
+
 fn map_workspace(
     repo_label: &str,
     repo_canonical: &str,
@@ -212,4 +240,55 @@ fn map_workspace(
         path: workspace.path.display().to_string(),
         sessions,
     }
+}
+
+fn resolve_gitdir_file(git_path: &Path, workspace_path: &Path) -> Result<PathBuf, SwarmError> {
+    let contents = fs::read_to_string(git_path)?;
+    let git_dir = contents
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| SwarmError::Git(format!("invalid gitdir file at {}", git_path.display())))?;
+
+    let git_dir = Path::new(git_dir);
+    if git_dir.is_absolute() {
+        return Ok(git_dir.to_path_buf());
+    }
+
+    Ok(workspace_path.join(git_dir))
+}
+
+fn run_git<I, S>(cwd: &Path, args: I) -> Result<String, SwarmError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd);
+
+    for arg in args {
+        cmd.arg(arg.as_ref());
+    }
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        return Err(SwarmError::Git(render_git_failure(output)));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn render_git_failure(output: std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    format!("exit status {}", output.status)
 }

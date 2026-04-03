@@ -125,14 +125,15 @@ impl WorkspaceStore {
         let mut workspaces = Vec::new();
 
         while let Some(row) = rows.next().await? {
-            workspaces.push(Workspace {
+            let workspace = Workspace {
                 repository: repo.canonical(),
                 repository_alias: repo.alias.clone().unwrap_or_else(|| repo.name.clone()),
                 name: row.get::<String>(0)?,
                 branch: row.get::<String>(1)?,
                 path: PathBuf::from(row.get::<String>(2)?),
                 created_at: row.get::<i64>(3)?,
-            });
+            };
+            workspaces.push(self.refresh_workspace_branch(&db, workspace).await?);
         }
 
         Ok(workspaces)
@@ -325,17 +326,39 @@ impl WorkspaceStore {
         let mut rows = stmt.query([name]).await?;
 
         if let Some(row) = rows.next().await? {
-            return Ok(Some(Workspace {
+            let workspace = Workspace {
                 repository: repo.canonical(),
                 repository_alias: repo.alias.clone().unwrap_or_else(|| repo.name.clone()),
                 name: row.get::<String>(0)?,
                 branch: row.get::<String>(1)?,
                 path: PathBuf::from(row.get::<String>(2)?),
                 created_at: row.get::<i64>(3)?,
-            }));
+            };
+            return Ok(Some(self.refresh_workspace_branch(db, workspace).await?));
         }
 
         Ok(None)
+    }
+
+    async fn refresh_workspace_branch(
+        &self,
+        db: &Connection,
+        workspace: Workspace,
+    ) -> Result<Workspace, SwarmError> {
+        let branch = git_current_branch(&workspace.path)?;
+        if branch == workspace.branch {
+            return Ok(workspace);
+        }
+
+        db.execute(
+            "UPDATE workspaces
+             SET branch = ?2
+             WHERE name = ?1",
+            (workspace.name.as_str(), branch.as_str()),
+        )
+        .await?;
+
+        Ok(Workspace { branch, ..workspace })
     }
 
     async fn count_workspace_sessions(
@@ -454,6 +477,15 @@ fn build_worktree_add_args(
     args.push(upstream_branch);
 
     Ok(args)
+}
+
+fn git_current_branch(path: &Path) -> Result<String, SwarmError> {
+    let branch = run_git(Some(path), ["branch", "--show-current"])?;
+    if !branch.is_empty() {
+        return Ok(branch);
+    }
+
+    run_git(Some(path), ["rev-parse", "--short", "HEAD"])
 }
 
 fn run_git<I, S>(cwd: Option<&Path>, args: I) -> Result<String, SwarmError>
