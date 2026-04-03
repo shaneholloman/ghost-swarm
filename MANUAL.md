@@ -16,6 +16,7 @@ Example: `github.com/penberg/swarm`
 
 `swarm repo` commands:
 - register a repository with `swarm`
+- sync a repository's local bare clone from the remote
 - remove a repository from `swarm`
 - list repositories known to `swarm`
 
@@ -487,6 +488,39 @@ swarm repo list --json
 ```text
 ALIAS            REPOSITORY
 swarm            github.com/penberg/swarm
+```
+
+### `swarm repo sync`
+
+Sync a registered repository from its remote.
+
+#### Usage
+
+```text
+swarm repo sync <repository>
+```
+
+#### Arguments
+
+- `<repository>`: Repository alias or canonical `host/owner/name`.
+
+#### Behavior
+
+- Resolves the repository by alias first, then by canonical identifier.
+- Creates or updates the local bare clone at `repos/<host>/<owner>/<name>/source.git`.
+- Fetches all remotes and prunes deleted refs when the bare clone already exists.
+
+#### Examples
+
+```text
+swarm repo sync swarm
+swarm repo sync github.com/penberg/swarm
+```
+
+#### Expected Output
+
+```text
+Synced repo swarm
 ```
 
 ### `swarm repo remove`
