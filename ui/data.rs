@@ -181,6 +181,23 @@ pub fn create_session(workspace_ref: &str) -> Result<SessionEntry, SwarmError> {
     })
 }
 
+pub fn close_session(session_id: &str) -> Result<SessionEntry, SwarmError> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let session_store = SessionStore::open().await?;
+        session_store.stop(session_id).await?;
+        let session = session_store.remove(session_id).await?;
+
+        Ok(SessionEntry {
+            id: session.id,
+            status: session.status,
+            command: session.command.join(" "),
+            log_path: session.log_path.display().to_string(),
+            socket_path: session.socket_path.display().to_string(),
+        })
+    })
+}
+
 fn map_workspace(
     repo_label: &str,
     repo_canonical: &str,
