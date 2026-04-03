@@ -1,11 +1,10 @@
 use gtk::{
-    gdk,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Image, Label,
+    ListBox, ListBoxRow, Orientation, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION,
+    ScrolledWindow, SelectionMode, Stack, Widget, gdk,
     gio::{self, FileMonitor, FileMonitorFlags},
     glib,
     prelude::*,
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Label,
-    ListBox, ListBoxRow, Orientation, PolicyType, ScrolledWindow, SelectionMode, Stack, Widget,
-    STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -14,9 +13,9 @@ use std::{
 
 use crate::{
     data::{
-        close_session, create_session, create_workspace, current_workspace_branch,
-        load_workspace_groups, rename_workspace, workspace_head_path, SessionEntry, WorkspaceEntry,
-        WorkspaceGroup,
+        SessionEntry, WorkspaceEntry, WorkspaceGroup, close_session, create_session,
+        create_workspace, current_workspace_branch, load_workspace_groups, remove_workspace,
+        rename_workspace, workspace_head_path,
     },
     ghostty,
 };
@@ -86,6 +85,25 @@ window {
 
 .workspace-card {
   padding: 9px 10px 9px 10px;
+}
+
+.workspace-delete-slot {
+  min-width: 28px;
+}
+
+.workspace-delete {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: #7a8698;
+}
+
+.workspace-delete:hover {
+  background: rgba(255, 133, 133, 0.16);
+  color: #ffd9d9;
 }
 
 .workspace-name {
@@ -316,7 +334,7 @@ fn build_sidebar(
     list.add_css_class("workspace-list");
     scroller.set_child(Some(&list));
 
-    let rows = Rc::new(RefCell::new(Vec::<(ListBoxRow, WorkspaceEntry)>::new()));
+    let rows = Rc::new(RefCell::new(Vec::<WorkspaceRow>::new()));
 
     for group in groups {
         let repo_row = build_repo_row(&state, &group.repo_label, &group.repo_canonical);
@@ -328,14 +346,15 @@ fn build_sidebar(
                 .borrow()
                 .as_ref()
                 .is_some_and(|editing| editing == &workspace_ref(workspace));
-            let row = build_workspace_row(workspace, &state, is_editing);
-            if selected_workspace
+            let is_selected = selected_workspace
                 .as_ref()
-                .is_some_and(|selected| selected.path == workspace.path)
-            {
+                .is_some_and(|selected| selected.path == workspace.path);
+            let workspace_row = build_workspace_row(workspace, &state, is_editing, is_selected);
+            let row = workspace_row.row.clone();
+            if is_selected {
                 list.select_row(Some(&row));
             }
-            rows.borrow_mut().push((row.clone(), workspace.clone()));
+            rows.borrow_mut().push(workspace_row);
             list.append(&row);
         }
     }
@@ -350,23 +369,35 @@ fn build_sidebar(
     {
         let rows_for_signal = rows.clone();
         let state = state.clone();
+        let detail_widgets = detail_widgets.clone();
         list.connect_row_selected(move |_list, row| {
             let Some(row) = row else {
                 return;
             };
+            let selected_row = row.clone();
 
             if !row.is_selectable() {
                 return;
             }
 
-            if let Some((_, workspace)) = rows_for_signal
-                .borrow()
-                .iter()
-                .find(|(candidate, _)| candidate == row)
-            {
-                *state.selected_workspace.borrow_mut() = Some(workspace_ref(workspace));
+            let selected_workspace = {
+                let rows = rows_for_signal.borrow();
+                for candidate in rows.iter() {
+                    let is_selected = candidate.row == selected_row;
+                    candidate.delete_button.set_visible(is_selected);
+                    candidate.delete_button.set_sensitive(is_selected);
+                }
+
+                rows.iter()
+                    .find(|workspace_row| workspace_row.row == selected_row)
+                    .map(|workspace_row| workspace_row.workspace.clone())
+            };
+
+            if let Some(workspace) = selected_workspace {
+                let workspace_ref = workspace_ref(&workspace);
+                *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
                 *state.selected_session.borrow_mut() = None;
-                detail_widgets.render_workspace(workspace, &state);
+                detail_widgets.render_workspace(&workspace, &state);
             }
         });
     }
@@ -408,13 +439,42 @@ fn build_workspace_row(
     workspace: &WorkspaceEntry,
     state: &Rc<AppState>,
     is_editing: bool,
-) -> ListBoxRow {
+    is_selected: bool,
+) -> WorkspaceRow {
     let row = ListBoxRow::new();
     row.set_selectable(true);
     row.set_activatable(true);
     row.add_css_class("workspace-row");
 
+    let container = GtkBox::new(Orientation::Horizontal, 0);
+    container.set_hexpand(true);
+
+    let delete_slot = GtkBox::new(Orientation::Horizontal, 0);
+    delete_slot.set_valign(Align::Center);
+    delete_slot.add_css_class("workspace-delete-slot");
+
+    let delete_button = Button::new();
+    delete_button.set_valign(Align::Center);
+    delete_button.set_tooltip_text(Some("Remove workspace"));
+    delete_button.add_css_class("workspace-delete");
+    delete_button.set_visible(is_selected);
+    delete_button.set_sensitive(is_selected);
+
+    let icon = Image::from_icon_name("user-trash-symbolic");
+    delete_button.set_child(Some(&icon));
+
+    {
+        let state = state.clone();
+        let workspace = workspace.clone();
+        delete_button.connect_clicked(move |_| {
+            remove_selected_workspace(&state, &workspace);
+        });
+    }
+
+    delete_slot.append(&delete_button);
+
     let card = GtkBox::new(Orientation::Vertical, 4);
+    card.set_hexpand(true);
     card.add_css_class("workspace-card");
 
     let branch = Label::new(Some(&workspace.branch));
@@ -445,8 +505,15 @@ fn build_workspace_row(
 
     install_branch_monitor(state, workspace, &branch);
 
-    row.set_child(Some(&card));
-    row
+    container.append(&delete_slot);
+    container.append(&card);
+    row.set_child(Some(&container));
+
+    WorkspaceRow {
+        row,
+        workspace: workspace.clone(),
+        delete_button,
+    }
 }
 
 fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, branch: &Label) {
@@ -599,6 +666,22 @@ fn commit_workspace_rename(state: &Rc<AppState>, current_workspace_ref: &str, ne
     }
 }
 
+fn remove_selected_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
+    let workspace_ref = workspace_ref(workspace);
+    match remove_workspace(&workspace_ref) {
+        Ok(_) => {
+            *state.selected_workspace.borrow_mut() = None;
+            *state.editing_workspace.borrow_mut() = None;
+            *state.selected_session.borrow_mut() = None;
+            schedule_refresh(state, None);
+        }
+        Err(err) => {
+            eprintln!("failed to remove workspace: {err}");
+            schedule_refresh(state, Some(workspace_ref));
+        }
+    }
+}
+
 fn next_workspace_placeholder() -> String {
     let groups = load_workspace_groups().unwrap_or_default();
     for index in 1.. {
@@ -623,6 +706,12 @@ struct DetailWidgets {
     session_toolbar: GtkBox,
     session_tabs: GtkBox,
     session_stack: Stack,
+}
+
+struct WorkspaceRow {
+    row: ListBoxRow,
+    workspace: WorkspaceEntry,
+    delete_button: Button,
 }
 
 impl DetailWidgets {

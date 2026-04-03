@@ -169,6 +169,34 @@ pub fn rename_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntr
     })
 }
 
+pub fn remove_workspace(workspace_ref: &str) -> Result<WorkspaceEntry, SwarmError> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let repo_store = RepositoryStore::open().await?;
+        let session_store = SessionStore::open().await?;
+        let workspace_store = WorkspaceStore::open().await?;
+        let sessions = session_store.list(Some(workspace_ref)).await?;
+
+        for session in sessions {
+            session_store.stop(&session.id).await?;
+            session_store.remove(&session.id).await?;
+        }
+
+        let workspace = workspace_store.remove(workspace_ref).await?;
+        let repo = repo_store
+            .resolve_repository(&workspace.repository)
+            .await?
+            .ok_or_else(|| SwarmError::RepositoryNotFound(workspace.repository.clone()))?;
+
+        Ok(map_workspace(
+            repo.alias.as_deref().unwrap_or(&repo.name),
+            &repo.canonical(),
+            workspace,
+            Vec::new(),
+        ))
+    })
+}
+
 pub fn create_session(workspace_ref: &str) -> Result<SessionEntry, SwarmError> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
