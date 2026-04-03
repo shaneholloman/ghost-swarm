@@ -205,23 +205,40 @@ window {
 }
 
 .terminal-host {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(19, 25, 36, 0.96) 0%, rgba(12, 17, 26, 0.98) 100%);
+  border: 1px solid rgba(154, 182, 255, 0.14);
+  border-radius: 18px;
   min-height: 560px;
+  padding: 10px 10px 10px 0;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.04), 0 18px 48px rgba(0, 0, 0, 0.24);
 }
 
 .terminal-view {
   background: transparent;
-  color: #edf2f7;
-  font-family: monospace;
-  font-size: 12px;
-  padding: 16px;
+  color: #e6edf3;
+  font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "Iosevka Term", "SF Mono", "Menlo", monospace;
+  font-size: 10px;
 }
 
 .terminal-empty {
-  color: #5e6877;
+  color: #74839a;
   font-size: 13px;
+}
+
+.terminal-host scrollbar {
+  background: transparent;
+  margin: 10px 8px 10px 0;
+  min-width: 10px;
+}
+
+.terminal-host scrollbar slider {
+  background: rgba(143, 175, 255, 0.24);
+  border-radius: 999px;
+  min-width: 8px;
+}
+
+.terminal-host scrollbar slider:hover {
+  background: rgba(143, 175, 255, 0.34);
 }
 
 "#;

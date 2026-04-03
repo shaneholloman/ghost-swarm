@@ -1,6 +1,6 @@
 use gtk::{
     Adjustment, Box as GtkBox, DrawingArea, EventControllerKey, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, Orientation, Scrollbar, gdk, glib, prelude::*,
+    EventControllerScrollFlags, GestureClick, Orientation, Scrollbar, gdk, glib, pango, prelude::*,
 };
 use libghostty_vt::{
     RenderState, Terminal, TerminalOptions, ffi,
@@ -8,9 +8,12 @@ use libghostty_vt::{
     style::{RgbColor, Style},
     terminal::ScrollViewport,
 };
+use pangocairo::functions::{create_layout, show_layout};
 use std::{
     cell::RefCell,
-    f64, fs,
+    f64,
+    fmt::Write as _,
+    fs,
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     path::Path,
@@ -23,11 +26,40 @@ use crate::data::SessionEntry;
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
 const MAX_SCROLLBACK: usize = 20_000;
-const CELL_WIDTH: f64 = 8.6;
-const CELL_HEIGHT: f64 = 18.0;
-const FONT_SIZE: f64 = 13.0;
-const FONT_FAMILY: &str = "monospace";
+const FONT_SIZE: f64 = 10.0;
+const FONT_FAMILIES: [&str; 6] = [
+    "JetBrainsMono Nerd Font",
+    "JetBrains Mono",
+    "Iosevka Term",
+    "SF Mono",
+    "Menlo",
+    "Monospace",
+];
 const SCROLL_LINES_PER_TICK: isize = 3;
+const HORIZONTAL_PADDING: f64 = 18.0;
+const VERTICAL_PADDING: f64 = 18.0;
+
+const THEME_BACKGROUND: RgbColor = rgb(0x10, 0x14, 0x1c);
+const THEME_FOREGROUND: RgbColor = rgb(0xe6, 0xed, 0xf3);
+const THEME_CURSOR: RgbColor = rgb(0x8b, 0xc2, 0xff);
+const THEME_PALETTE: [RgbColor; 16] = [
+    rgb(0x22, 0x28, 0x33),
+    rgb(0xf0, 0x71, 0x78),
+    rgb(0xa6, 0xda, 0x95),
+    rgb(0xe6, 0xc3, 0x84),
+    rgb(0x7d, 0xb7, 0xff),
+    rgb(0xc6, 0xa0, 0xf6),
+    rgb(0x6c, 0xd4, 0xe3),
+    rgb(0xd8, 0xdf, 0xe7),
+    rgb(0x55, 0x61, 0x73),
+    rgb(0xff, 0x8b, 0x92),
+    rgb(0xb8, 0xf2, 0xa7),
+    rgb(0xf4, 0xd1, 0x9a),
+    rgb(0x98, 0xc7, 0xff),
+    rgb(0xd7, 0xb7, 0xff),
+    rgb(0x8c, 0xe5, 0xf0),
+    rgb(0xf4, 0xf8, 0xfc),
+];
 
 pub fn terminal_host(session: &SessionEntry) -> GtkBox {
     let area = DrawingArea::new();
@@ -152,6 +184,9 @@ struct SessionTerminalState {
     sync_adjustment: bool,
     last_cols: u16,
     last_rows: u16,
+    cell_width: f64,
+    cell_height: f64,
+    font_desc: pango::FontDescription,
 }
 
 impl SessionTerminalState {
@@ -167,6 +202,7 @@ impl SessionTerminalState {
             max_scrollback: MAX_SCROLLBACK,
         })
         .expect("failed to create libghostty-vt terminal");
+        apply_pretty_theme(&mut terminal);
 
         if let Ok(log) = fs::read(Path::new(&session.log_path)) {
             terminal.vt_write(&log);
@@ -198,6 +234,9 @@ impl SessionTerminalState {
             sync_adjustment: false,
             last_cols: DEFAULT_COLS,
             last_rows: DEFAULT_ROWS,
+            cell_width: 8.6,
+            cell_height: 18.0,
+            font_desc: pango::FontDescription::new(),
         }))
     }
 
@@ -243,6 +282,7 @@ impl SessionTerminalState {
     }
 
     fn draw(&mut self, cr: &gtk::cairo::Context, width: i32, height: i32) {
+        self.update_metrics(cr);
         self.resize_terminal(width, height);
 
         let Ok(snapshot) = self.render_state.update(&self.terminal) else {
@@ -253,16 +293,8 @@ impl SessionTerminalState {
         };
 
         paint_rect(cr, 0.0, 0.0, width as f64, height as f64, colors.background);
-        cr.select_font_face(
-            FONT_FAMILY,
-            gtk::cairo::FontSlant::Normal,
-            gtk::cairo::FontWeight::Normal,
-        );
-        cr.set_font_size(FONT_SIZE);
-        let Ok(font_extents) = cr.font_extents() else {
-            return;
-        };
-        let baseline = ((CELL_HEIGHT - font_extents.height()) / 2.0) + font_extents.ascent();
+        let layout = create_layout(cr);
+        layout.set_font_description(Some(&self.font_desc));
 
         let Ok(mut rows) = self.row_iterator.update(&snapshot) else {
             return;
@@ -279,18 +311,19 @@ impl SessionTerminalState {
                 let style = cell.style().unwrap_or_default();
                 let (fg, bg) = resolved_colors(cell, &style, colors.foreground, colors.background);
 
-                let x = f64::from(col_index) * CELL_WIDTH;
-                let y = f64::from(row_index) * CELL_HEIGHT;
-                paint_rect(cr, x, y, CELL_WIDTH, CELL_HEIGHT, bg);
+                let x = HORIZONTAL_PADDING + (f64::from(col_index) * self.cell_width);
+                let y = VERTICAL_PADDING + (f64::from(row_index) * self.cell_height);
+                paint_rect(cr, x, y, self.cell_width, self.cell_height, bg);
 
                 if !style.invisible {
                     let text: String = cell.graphemes().unwrap_or_default().into_iter().collect();
                     if !text.is_empty() && text != " " {
-                        cr.select_font_face(FONT_FAMILY, font_slant(style), font_weight(style));
-                        cr.set_font_size(FONT_SIZE);
+                        let font_desc = styled_font_description(&self.font_desc, style);
+                        layout.set_font_description(Some(&font_desc));
+                        layout.set_text(&text);
                         set_source_color(cr, fg);
-                        cr.move_to(x, y + baseline);
-                        let _ = cr.show_text(&text);
+                        cr.move_to(x, y);
+                        show_layout(cr, &layout);
                     }
                 }
 
@@ -308,14 +341,37 @@ impl SessionTerminalState {
                     .flatten()
                     .or(colors.cursor)
                     .unwrap_or(colors.foreground);
-                draw_cursor(cr, cursor.x, cursor.y, cursor_color, &snapshot);
+                draw_cursor(
+                    cr,
+                    cursor.x,
+                    cursor.y,
+                    cursor_color,
+                    &snapshot,
+                    self.cell_width,
+                    self.cell_height,
+                );
             }
         }
     }
 
+    fn update_metrics(&mut self, cr: &gtk::cairo::Context) {
+        let layout = create_layout(cr);
+        let font_context = layout.context();
+        self.font_desc = terminal_font_description(&font_context);
+        layout.set_font_description(Some(&self.font_desc));
+        layout.set_text("M");
+
+        let (pixel_width, pixel_height) = layout.pixel_size();
+
+        self.cell_width = f64::from(pixel_width).max(1.0);
+        self.cell_height = f64::from(pixel_height).max(1.0);
+    }
+
     fn resize_terminal(&mut self, width: i32, height: i32) {
-        let cols = ((f64::from(width) / CELL_WIDTH).floor() as u16).max(1);
-        let rows = ((f64::from(height) / CELL_HEIGHT).floor() as u16).max(1);
+        let usable_width = (f64::from(width) - (HORIZONTAL_PADDING * 2.0)).max(self.cell_width);
+        let usable_height = (f64::from(height) - (VERTICAL_PADDING * 2.0)).max(self.cell_height);
+        let cols = ((usable_width / self.cell_width).floor() as u16).max(1);
+        let rows = ((usable_height / self.cell_height).floor() as u16).max(1);
         if cols == self.last_cols && rows == self.last_rows {
             return;
         }
@@ -325,8 +381,8 @@ impl SessionTerminalState {
         let _ = self.terminal.resize(
             cols,
             rows,
-            CELL_WIDTH.round() as u32,
-            CELL_HEIGHT.round() as u32,
+            self.cell_width.round() as u32,
+            self.cell_height.round() as u32,
         );
         if self.should_follow_output() {
             self.terminal.scroll_viewport(ScrollViewport::Bottom);
@@ -465,46 +521,32 @@ fn dim_color(color: RgbColor) -> RgbColor {
     }
 }
 
-fn font_slant(style: Style) -> gtk::cairo::FontSlant {
-    if style.italic {
-        gtk::cairo::FontSlant::Italic
-    } else {
-        gtk::cairo::FontSlant::Normal
-    }
-}
-
-fn font_weight(style: Style) -> gtk::cairo::FontWeight {
-    if style.bold {
-        gtk::cairo::FontWeight::Bold
-    } else {
-        gtk::cairo::FontWeight::Normal
-    }
-}
-
 fn draw_cursor(
     cr: &gtk::cairo::Context,
     x: u16,
     y: u16,
     color: RgbColor,
     snapshot: &libghostty_vt::render::Snapshot<'_, '_>,
+    cell_width: f64,
+    cell_height: f64,
 ) {
-    let x = f64::from(x) * CELL_WIDTH;
-    let y = f64::from(y) * CELL_HEIGHT;
+    let x = HORIZONTAL_PADDING + (f64::from(x) * cell_width);
+    let y = VERTICAL_PADDING + (f64::from(y) * cell_height);
     let style = snapshot
         .cursor_visual_style()
         .unwrap_or(CursorVisualStyle::Block);
 
     match style {
         CursorVisualStyle::Bar => {
-            paint_rect(cr, x, y, 2.0, CELL_HEIGHT, color);
+            paint_rect(cr, x, y, 2.0, cell_height, color);
         }
         CursorVisualStyle::Underline => {
-            paint_rect(cr, x, y + CELL_HEIGHT - 2.0, CELL_WIDTH, 2.0, color);
+            paint_rect(cr, x, y + cell_height - 2.0, cell_width, 2.0, color);
         }
         CursorVisualStyle::BlockHollow => {
             set_source_color(cr, color);
             cr.set_line_width(1.0);
-            cr.rectangle(x + 0.5, y + 0.5, CELL_WIDTH - 1.0, CELL_HEIGHT - 1.0);
+            cr.rectangle(x + 0.5, y + 0.5, cell_width - 1.0, cell_height - 1.0);
             let _ = cr.stroke();
         }
         CursorVisualStyle::Block => {
@@ -512,10 +554,10 @@ fn draw_cursor(
             fill.r = fill.r.saturating_add(24);
             fill.g = fill.g.saturating_add(24);
             fill.b = fill.b.saturating_add(24);
-            paint_rect(cr, x, y, CELL_WIDTH, CELL_HEIGHT, fill);
+            paint_rect(cr, x, y, cell_width, cell_height, fill);
         }
         _ => {
-            paint_rect(cr, x, y, CELL_WIDTH, CELL_HEIGHT, color);
+            paint_rect(cr, x, y, cell_width, cell_height, color);
         }
     }
 }
@@ -532,6 +574,70 @@ fn set_source_color(cr: &gtk::cairo::Context, color: RgbColor) {
         f64::from(color.g) / 255.0,
         f64::from(color.b) / 255.0,
     );
+}
+
+fn terminal_font_description(context: &pango::Context) -> pango::FontDescription {
+    let mut font_desc = pango::FontDescription::new();
+    font_desc.set_family(select_terminal_font_family(context));
+    font_desc.set_size((FONT_SIZE * f64::from(pango::SCALE)).round() as i32);
+    font_desc
+}
+
+fn styled_font_description(base: &pango::FontDescription, style: Style) -> pango::FontDescription {
+    let mut font_desc = base.clone();
+    font_desc.set_style(if style.italic {
+        pango::Style::Italic
+    } else {
+        pango::Style::Normal
+    });
+    font_desc.set_weight(if style.bold {
+        pango::Weight::Bold
+    } else {
+        pango::Weight::Normal
+    });
+    font_desc
+}
+
+fn apply_pretty_theme(terminal: &mut Terminal<'static, 'static>) {
+    let mut escape = String::new();
+    write!(
+        &mut escape,
+        "\u{1b}]10;{}\u{7}\u{1b}]11;{}\u{7}\u{1b}]12;{}\u{7}",
+        color_to_hex(THEME_FOREGROUND),
+        color_to_hex(THEME_BACKGROUND),
+        color_to_hex(THEME_CURSOR)
+    )
+    .expect("writing terminal theme colors should not fail");
+
+    for (index, color) in THEME_PALETTE.iter().enumerate() {
+        write!(
+            &mut escape,
+            "\u{1b}]4;{index};{}\u{7}",
+            color_to_hex(*color)
+        )
+        .expect("writing terminal palette should not fail");
+    }
+
+    terminal.vt_write(escape.as_bytes());
+}
+
+fn color_to_hex(color: RgbColor) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+fn select_terminal_font_family(context: &pango::Context) -> &str {
+    let families = context.list_families();
+    for candidate in FONT_FAMILIES {
+        if families.iter().any(|family| family.name() == candidate) {
+            return candidate;
+        }
+    }
+
+    "Monospace"
+}
+
+const fn rgb(r: u8, g: u8, b: u8) -> RgbColor {
+    RgbColor { r, g, b }
 }
 
 fn is_paste_shortcut(key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
