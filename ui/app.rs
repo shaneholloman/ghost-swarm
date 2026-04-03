@@ -1,7 +1,7 @@
 use gtk::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Label,
     ListBox, ListBoxRow, Orientation, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION,
-    ScrolledWindow, SelectionMode, Stack, StackSwitcher, Widget, gdk, glib, prelude::*,
+    ScrolledWindow, SelectionMode, Stack, Widget, gdk, glib, prelude::*,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -10,8 +10,8 @@ use std::{
 
 use crate::{
     data::{
-        SessionEntry, WorkspaceEntry, WorkspaceGroup, create_session, create_workspace,
-        load_workspace_groups, rename_workspace,
+        SessionEntry, WorkspaceEntry, WorkspaceGroup, close_session, create_session,
+        create_workspace, load_workspace_groups, rename_workspace,
     },
     ghostty,
 };
@@ -94,15 +94,29 @@ window {
   font-size: 11px;
 }
 
-.session-switcher {
-  margin-bottom: 12px;
-}
-
 .session-toolbar {
   margin-bottom: 12px;
 }
 
-.session-switcher button {
+.session-tabs {
+  spacing: 0;
+}
+
+.session-tab {
+  background: transparent;
+  border-radius: 10px;
+  padding: 0 4px 0 0;
+}
+
+.session-tab:hover {
+  background: rgba(126, 203, 255, 0.08);
+}
+
+.session-tab-active {
+  background: rgba(126, 203, 255, 0.12);
+}
+
+.session-tab-select {
   background: transparent;
   border: none;
   border-radius: 10px;
@@ -112,8 +126,7 @@ window {
   padding: 7px 10px;
 }
 
-.session-switcher button:checked {
-  background: rgba(126, 203, 255, 0.12);
+.session-tab-active .session-tab-select {
   color: #ecf6ff;
 }
 
@@ -132,6 +145,30 @@ window {
 .session-add:hover {
   background: rgba(126, 203, 255, 0.08);
   color: #e7f3ff;
+}
+
+.session-close {
+  min-width: 18px;
+  min-height: 18px;
+  margin: 0 6px 0 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  color: #7a8698;
+  font-size: 11px;
+  font-weight: 700;
+  opacity: 0;
+}
+
+.session-close:hover {
+  background: rgba(255, 133, 133, 0.16);
+  color: #ffd9d9;
+}
+
+.session-tab:hover .session-close,
+.session-tab-active .session-close {
+  opacity: 1;
 }
 
 .terminal-host {
@@ -526,7 +563,7 @@ fn next_workspace_placeholder() -> String {
 struct DetailWidgets {
     container: GtkBox,
     session_toolbar: GtkBox,
-    session_switcher: StackSwitcher,
+    session_tabs: GtkBox,
     session_stack: Stack,
 }
 
@@ -544,10 +581,9 @@ impl DetailWidgets {
         session_stack.set_hexpand(true);
         session_stack.set_vexpand(true);
 
-        let session_switcher = StackSwitcher::new();
-        session_switcher.add_css_class("session-switcher");
-        session_switcher.set_halign(Align::Start);
-        session_switcher.set_stack(Some(&session_stack));
+        let session_tabs = GtkBox::new(Orientation::Horizontal, 6);
+        session_tabs.set_halign(Align::Start);
+        session_tabs.add_css_class("session-tabs");
 
         {
             let state = state.clone();
@@ -557,14 +593,14 @@ impl DetailWidgets {
             });
         }
 
-        session_toolbar.append(&session_switcher);
+        session_toolbar.append(&session_tabs);
         container.append(&session_toolbar);
         container.append(&session_stack);
 
         Self {
             container,
             session_toolbar,
-            session_switcher,
+            session_tabs,
             session_stack,
         }
     }
@@ -572,15 +608,14 @@ impl DetailWidgets {
     fn render_empty(&self) {
         clear_box(&self.session_toolbar);
         clear_stack(&self.session_stack);
-        self.session_switcher.set_visible(false);
     }
 
     fn render_workspace(&self, workspace: &WorkspaceEntry, state: &Rc<AppState>) {
         clear_box(&self.session_toolbar);
         clear_stack(&self.session_stack);
 
-        self.session_switcher.set_stack(Some(&self.session_stack));
-        self.session_toolbar.append(&self.session_switcher);
+        clear_box(&self.session_tabs);
+        self.session_toolbar.append(&self.session_tabs);
 
         let add_button = Button::with_label("+");
         add_button.set_valign(Align::Center);
@@ -595,7 +630,6 @@ impl DetailWidgets {
         self.session_toolbar.append(&add_button);
 
         if workspace.sessions.is_empty() {
-            self.session_switcher.set_visible(false);
             let empty = ghostty::terminal_host(&SessionEntry {
                 id: "No sessions".to_string(),
                 status: "idle".to_string(),
@@ -608,17 +642,41 @@ impl DetailWidgets {
             return;
         }
 
-        self.session_switcher.set_visible(true);
         for session in &workspace.sessions {
             let host = ghostty::terminal_host(session);
             self.session_stack
                 .add_titled(&host, Some(&session.id), &session.id);
         }
-        if let Some(selected_session) = state.selected_session.borrow().as_ref() {
-            self.session_stack.set_visible_child_name(selected_session);
-        } else {
-            self.session_stack
-                .set_visible_child_name(&workspace.sessions[0].id);
+
+        let selected_session = state
+            .selected_session
+            .borrow()
+            .clone()
+            .filter(|selected| {
+                workspace
+                    .sessions
+                    .iter()
+                    .any(|session| session.id == *selected)
+            })
+            .unwrap_or_else(|| workspace.sessions[0].id.clone());
+        self.session_stack.set_visible_child_name(&selected_session);
+
+        let workspace_ref = workspace_ref(workspace);
+        let session_ids = workspace
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        for session in &workspace.sessions {
+            let tab = build_session_tab(
+                state,
+                &workspace_ref,
+                &session_ids,
+                &session.id,
+                session.id == selected_session,
+                &self.session_stack,
+            );
+            self.session_tabs.append(&tab);
         }
     }
 }
@@ -635,6 +693,52 @@ fn clear_stack(stack: &Stack) {
     }
 }
 
+fn build_session_tab(
+    state: &Rc<AppState>,
+    workspace_ref: &str,
+    session_ids: &[String],
+    session_id: &str,
+    active: bool,
+    session_stack: &Stack,
+) -> GtkBox {
+    let tab = GtkBox::new(Orientation::Horizontal, 0);
+    tab.add_css_class("session-tab");
+    if active {
+        tab.add_css_class("session-tab-active");
+    }
+
+    let select_button = Button::with_label(session_id);
+    select_button.set_valign(Align::Center);
+    select_button.add_css_class("session-tab-select");
+    {
+        let state = state.clone();
+        let session_id = session_id.to_string();
+        let session_stack = session_stack.clone();
+        select_button.connect_clicked(move |_| {
+            *state.selected_session.borrow_mut() = Some(session_id.clone());
+            session_stack.set_visible_child_name(&session_id);
+        });
+    }
+
+    let close_button = Button::with_label("X");
+    close_button.set_focus_on_click(false);
+    close_button.set_valign(Align::Center);
+    close_button.add_css_class("session-close");
+    {
+        let state = state.clone();
+        let workspace_ref = workspace_ref.to_string();
+        let session_ids = session_ids.to_vec();
+        let session_id = session_id.to_string();
+        close_button.connect_clicked(move |_| {
+            close_specific_session(&state, &workspace_ref, &session_ids, &session_id);
+        });
+    }
+
+    tab.append(&select_button);
+    tab.append(&close_button);
+    tab
+}
+
 fn create_and_select_session(state: &Rc<AppState>, workspace_ref: &str) {
     match create_session(workspace_ref) {
         Ok(session) => {
@@ -644,6 +748,29 @@ fn create_and_select_session(state: &Rc<AppState>, workspace_ref: &str) {
         }
         Err(err) => {
             eprintln!("failed to create session: {err}");
+        }
+    }
+}
+
+fn close_specific_session(
+    state: &Rc<AppState>,
+    workspace_ref: &str,
+    session_ids: &[String],
+    session_id: &str,
+) {
+    let next_selected = session_ids
+        .iter()
+        .find(|id| id.as_str() != session_id)
+        .cloned();
+
+    match close_session(session_id) {
+        Ok(_) => {
+            *state.selected_workspace.borrow_mut() = Some(workspace_ref.to_string());
+            *state.selected_session.borrow_mut() = next_selected;
+            schedule_refresh(state, Some(workspace_ref.to_string()));
+        }
+        Err(err) => {
+            eprintln!("failed to close session: {err}");
         }
     }
 }
