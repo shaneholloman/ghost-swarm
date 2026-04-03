@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 use turso::{Builder, Connection};
@@ -226,6 +227,51 @@ impl RepositoryStore {
         Ok(repos)
     }
 
+    pub async fn sync(&self, repository: &str) -> Result<Repository, SwarmError> {
+        let repo = self
+            .resolve(repository)
+            .await?
+            .ok_or_else(|| SwarmError::RepositoryNotFound(repository.to_string()))?;
+        self.sync_repo(&repo)?;
+
+        Ok(repo)
+    }
+
+    pub fn sync_repo(&self, repo: &Repository) -> Result<(), SwarmError> {
+        let repo_dir = self.paths.repo_dir(repo);
+        let bare_repo_path = self.bare_repo_path(repo);
+
+        fs::create_dir_all(&repo_dir)?;
+
+        if bare_repo_path.exists() && !git_is_bare_repository(&bare_repo_path)? {
+            fs::remove_dir_all(&bare_repo_path)?;
+        }
+
+        if !bare_repo_path.exists() {
+            run_git(
+                Some(&repo_dir),
+                [
+                    "clone".to_string(),
+                    "--bare".to_string(),
+                    repo.remote_url(),
+                    bare_repo_path.display().to_string(),
+                ],
+            )?;
+        } else {
+            run_git(
+                Some(&repo_dir),
+                [
+                    format!("--git-dir={}", bare_repo_path.display()),
+                    "fetch".to_string(),
+                    "--all".to_string(),
+                    "--prune".to_string(),
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
     pub async fn resolve_repository(
         &self,
         reference: &str,
@@ -355,6 +401,56 @@ impl RepositoryStore {
 
 fn path_to_string(path: &Path) -> Result<&str, SwarmError> {
     path.to_str().ok_or(SwarmError::PathResolution)
+}
+
+fn git_is_bare_repository(path: &Path) -> Result<bool, SwarmError> {
+    let output = Command::new("git")
+        .arg(format!("--git-dir={}", path.display()))
+        .args(["rev-parse", "--is-bare-repository"])
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+fn run_git<I, S>(cwd: Option<&Path>, args: I) -> Result<String, SwarmError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut cmd = Command::new("git");
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+
+    for arg in args {
+        cmd.arg(arg.as_ref());
+    }
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        return Err(SwarmError::Git(render_git_failure(output)));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn render_git_failure(output: std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    format!("exit status {}", output.status)
 }
 
 fn unix_timestamp() -> i64 {

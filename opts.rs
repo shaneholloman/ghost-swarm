@@ -30,6 +30,9 @@ pub enum RepoSubcommand {
         #[arg(long)]
         alias: Option<String>,
     },
+    Sync {
+        repository: String,
+    },
     Remove {
         repository: String,
     },

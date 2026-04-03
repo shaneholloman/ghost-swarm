@@ -12,6 +12,10 @@ pub async fn run(cmd: RepoCommand) -> Result<(), SwarmError> {
             let repo = store.add(&repository, alias.as_deref()).await?;
             println!("Added repo {}", repo.alias.as_deref().unwrap_or("-"));
         }
+        RepoSubcommand::Sync { repository } => {
+            let repo = store.sync(&repository).await?;
+            println!("Synced repo {}", repo.alias.as_deref().unwrap_or("-"));
+        }
         RepoSubcommand::Remove { repository } => {
             let repo = store.remove(&repository).await?;
             println!("Removed repo {}", repo.alias.as_deref().unwrap_or("-"));

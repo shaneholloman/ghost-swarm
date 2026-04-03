@@ -360,39 +360,11 @@ impl WorkspaceStore {
     }
 
     fn ensure_bare_repo(&self, repo: &Repository) -> Result<String, SwarmError> {
-        let repo_dir = self.repos.repo_dir(repo);
         let bare_repo_path = self.repos.bare_repo_path(repo);
-
-        fs::create_dir_all(&repo_dir)?;
-
-        if bare_repo_path.exists() && !git_is_bare_repository(&bare_repo_path)? {
-            fs::remove_dir_all(&bare_repo_path)?;
-        }
-
-        if !bare_repo_path.exists() {
-            run_git(
-                Some(&repo_dir),
-                [
-                    "clone".to_string(),
-                    "--bare".to_string(),
-                    repo.remote_url(),
-                    bare_repo_path.display().to_string(),
-                ],
-            )?;
-        } else {
-            run_git(
-                Some(&repo_dir),
-                [
-                    format!("--git-dir={}", bare_repo_path.display()),
-                    "fetch".to_string(),
-                    "--all".to_string(),
-                    "--prune".to_string(),
-                ],
-            )?;
-        }
+        self.repos.sync_repo(repo)?;
 
         let head = run_git(
-            Some(&repo_dir),
+            Some(&self.repos.repo_dir(repo)),
             [
                 format!("--git-dir={}", bare_repo_path.display()),
                 "symbolic-ref".to_string(),
@@ -491,19 +463,6 @@ fn git_branch_exists(bare_repo_path: &Path, branch: &str) -> Result<bool, SwarmE
     }
 
     Err(SwarmError::Git(render_git_failure(output)))
-}
-
-fn git_is_bare_repository(path: &Path) -> Result<bool, SwarmError> {
-    let output = Command::new("git")
-        .arg(format!("--git-dir={}", path.display()))
-        .args(["rev-parse", "--is-bare-repository"])
-        .output()?;
-
-    if !output.status.success() {
-        return Ok(false);
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
 fn run_git<I, S>(cwd: Option<&Path>, args: I) -> Result<String, SwarmError>
