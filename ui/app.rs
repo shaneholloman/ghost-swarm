@@ -705,7 +705,8 @@ fn sync_repo_and_refresh(state: &Rc<AppState>, repo_canonical: &str) {
     match sync_repository(repo_canonical) {
         Ok(()) => {
             let preferred_workspace = state.selected_workspace.borrow().clone();
-            schedule_refresh(state, preferred_workspace);
+            let preferred_session = state.selected_session.borrow().clone();
+            schedule_refresh(state, preferred_workspace, preferred_session);
         }
         Err(err) => {
             eprintln!("failed to sync repository: {err}");
@@ -807,11 +808,11 @@ fn remove_selected_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
             *state.selected_workspace.borrow_mut() = None;
             *state.editing_workspace.borrow_mut() = None;
             *state.selected_session.borrow_mut() = None;
-            schedule_refresh(state, None);
+            schedule_refresh(state, None, None);
         }
         Err(err) => {
             eprintln!("failed to remove workspace: {err}");
-            schedule_refresh(state, Some(workspace_ref));
+            schedule_refresh(state, Some(workspace_ref), None);
         }
     }
 }
