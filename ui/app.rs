@@ -13,10 +13,9 @@ use std::{
 
 use crate::{
     data::{
-        SessionEntry, WorkspaceEntry, WorkspaceGroup, close_session, collapse_repository,
-        create_session, create_workspace, current_workspace_branch, expand_repository,
-        load_workspace_groups, remove_workspace, rename_workspace, sync_repository,
-        workspace_head_path,
+        SessionEntry, WorkspaceEntry, WorkspaceGroup, add_repository, close_session,
+        create_session, create_workspace, current_workspace_branch, load_workspace_groups,
+        remove_workspace, rename_workspace, sync_repository, workspace_head_path,
     },
     ghostty,
 };
@@ -35,6 +34,81 @@ window {
   background: #0a0d12;
   border-right: 1px solid rgba(255, 255, 255, 0.08);
   padding: 14px 10px;
+}
+
+.sidebar-toolbar {
+  margin-bottom: 10px;
+}
+
+.sidebar-primary-action {
+  min-height: 28px;
+  padding: 0 10px;
+  background: transparent;
+  color: #cfd8e4;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sidebar-primary-action:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #f3f7fb;
+}
+
+.repo-compose {
+  margin-bottom: 12px;
+  padding: 2px 0 4px 0;
+}
+
+.repo-compose-entry {
+  min-height: 32px;
+  padding: 0 9px;
+  background: rgba(255, 255, 255, 0.025);
+  color: #eef4fb;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+}
+
+.repo-compose-entry text {
+  color: #eef4fb;
+}
+
+.repo-compose-error {
+  color: #ff9b9b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.repo-compose-submit {
+  min-height: 26px;
+  padding: 0 10px;
+  background: transparent;
+  color: #eef7ff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.repo-compose-submit:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.repo-compose-cancel {
+  min-height: 26px;
+  padding: 0 10px;
+  background: transparent;
+  color: #7f8b9d;
+  border: none;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.repo-compose-cancel:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #f3f5f7;
 }
 
 .content {
@@ -56,21 +130,6 @@ window {
   color: #7a8698;
   font-size: 16px;
   font-weight: 500;
-}
-
-.repo-toggle {
-  min-width: 24px;
-  min-height: 24px;
-  padding: 0;
-  background: transparent;
-  border: none;
-  border-radius: 8px;
-  color: #7a8698;
-}
-
-.repo-toggle:hover {
-  background: rgba(126, 203, 255, 0.08);
-  color: #e7f3ff;
 }
 
 .repo-add:hover {
@@ -308,6 +367,7 @@ fn build_ui(app: &Application) {
         selected_workspace: RefCell::new(None),
         editing_workspace: RefCell::new(None),
         selected_session: RefCell::new(None),
+        repository_form: RefCell::new(RepositoryFormState::default()),
         branch_monitors: RefCell::new(Vec::new()),
     });
     refresh_ui(&state, None, None);
@@ -320,7 +380,16 @@ struct AppState {
     selected_workspace: RefCell<Option<String>>,
     editing_workspace: RefCell<Option<String>>,
     selected_session: RefCell<Option<String>>,
+    repository_form: RefCell<RepositoryFormState>,
     branch_monitors: RefCell<Vec<FileMonitor>>,
+}
+
+#[derive(Clone, Default)]
+struct RepositoryFormState {
+    expanded: bool,
+    repository: String,
+    alias: String,
+    error: Option<String>,
 }
 
 fn refresh_ui(
@@ -392,6 +461,15 @@ fn build_sidebar(
     sidebar.set_vexpand(true);
     sidebar.add_css_class("sidebar");
 
+    let groups_empty = groups.is_empty();
+    let toolbar = build_sidebar_toolbar(&state, groups_empty);
+    sidebar.append(&toolbar);
+
+    if state.repository_form.borrow().expanded || groups_empty {
+        let form = build_repository_form(&state, groups_empty);
+        sidebar.append(&form);
+    }
+
     let scroller = ScrolledWindow::new();
     scroller.set_policy(PolicyType::Never, PolicyType::Automatic);
     scroller.set_hexpand(true);
@@ -410,33 +488,36 @@ fn build_sidebar(
             &group.repo_label,
             &group.repo_canonical,
             group.repo_status.as_deref(),
-            group.collapsed,
         );
         sidebar_append_static_row(&list, &repo_row);
 
-        if !group.collapsed {
-            for workspace in &group.workspaces {
-                let is_editing = state
-                    .editing_workspace
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|editing| editing == &workspace_ref(workspace));
-                let is_selected = selected_workspace
-                    .as_ref()
-                    .is_some_and(|selected| selected.path == workspace.path);
-                let workspace_row = build_workspace_row(workspace, &state, is_editing, is_selected);
-                let row = workspace_row.row.clone();
-                if is_selected {
-                    list.select_row(Some(&row));
-                }
-                rows.borrow_mut().push(workspace_row);
-                list.append(&row);
+        for workspace in &group.workspaces {
+            let is_editing = state
+                .editing_workspace
+                .borrow()
+                .as_ref()
+                .is_some_and(|editing| editing == &workspace_ref(workspace));
+            let is_selected = selected_workspace
+                .as_ref()
+                .is_some_and(|selected| selected.path == workspace.path);
+            let workspace_row = build_workspace_row(workspace, &state, is_editing, is_selected);
+            let row = workspace_row.row.clone();
+            if is_selected {
+                list.select_row(Some(&row));
             }
+            rows.borrow_mut().push(workspace_row);
+            list.append(&row);
         }
     }
 
-    let has_any_workspaces = groups.iter().any(|group| group.workspace_count > 0);
-    if !has_any_workspaces {
+    if groups_empty {
+        let empty = Label::new(Some("Add a repository to start creating workspaces."));
+        empty.set_wrap(true);
+        empty.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        empty.set_xalign(0.0);
+        empty.add_css_class("terminal-empty");
+        sidebar_append_static_row(&list, &empty);
+    } else if rows.borrow().is_empty() {
         let empty = Label::new(Some("No workspaces yet."));
         empty.set_xalign(0.0);
         empty.add_css_class("terminal-empty");
@@ -494,12 +575,142 @@ fn build_sidebar(
     sidebar
 }
 
+fn build_sidebar_toolbar(state: &Rc<AppState>, groups_empty: bool) -> GtkBox {
+    let row = GtkBox::new(Orientation::Horizontal, 8);
+    row.set_halign(Align::Fill);
+    row.set_hexpand(true);
+    row.add_css_class("sidebar-toolbar");
+
+    if !groups_empty {
+        let button = Button::with_label("Add repository");
+        button.set_valign(Align::Center);
+        button.add_css_class("sidebar-primary-action");
+        {
+            let state = state.clone();
+            button.connect_clicked(move |_| {
+                let preferred_workspace = state.selected_workspace.borrow().clone();
+                let mut form = state.repository_form.borrow_mut();
+                form.expanded = true;
+                form.error = None;
+                drop(form);
+                schedule_refresh(&state, preferred_workspace, None);
+            });
+        }
+        row.append(&button);
+    }
+
+    row
+}
+
+fn build_repository_form(state: &Rc<AppState>, groups_empty: bool) -> GtkBox {
+    let form_state = state.repository_form.borrow().clone();
+
+    let card = GtkBox::new(Orientation::Vertical, 6);
+    card.add_css_class("repo-compose");
+
+    let repository_entry = Entry::new();
+    repository_entry.set_placeholder_text(Some("github.com/owner/name"));
+    repository_entry.set_text(&form_state.repository);
+    repository_entry.add_css_class("repo-compose-entry");
+    card.append(&repository_entry);
+
+    let alias_entry = Entry::new();
+    alias_entry.set_placeholder_text(Some("Optional alias"));
+    alias_entry.set_text(&form_state.alias);
+    alias_entry.add_css_class("repo-compose-entry");
+    card.append(&alias_entry);
+
+    if let Some(error) = form_state.error {
+        let error_label = Label::new(Some(&error));
+        error_label.set_xalign(0.0);
+        error_label.set_wrap(true);
+        error_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        error_label.add_css_class("repo-compose-error");
+        card.append(&error_label);
+    }
+
+    let actions = GtkBox::new(Orientation::Horizontal, 6);
+
+    let submit = Button::with_label("Add");
+    submit.add_css_class("repo-compose-submit");
+    actions.append(&submit);
+
+    if !groups_empty {
+        let cancel = Button::with_label("Cancel");
+        cancel.add_css_class("repo-compose-cancel");
+        {
+            let state = state.clone();
+            cancel.connect_clicked(move |_| {
+                let preferred_workspace = state.selected_workspace.borrow().clone();
+                let mut form = state.repository_form.borrow_mut();
+                form.expanded = false;
+                form.error = None;
+                drop(form);
+                schedule_refresh(&state, preferred_workspace, None);
+            });
+        }
+        actions.append(&cancel);
+    }
+
+    card.append(&actions);
+
+    {
+        let state = state.clone();
+        repository_entry.connect_changed(move |entry| {
+            let mut form = state.repository_form.borrow_mut();
+            form.repository = entry.text().to_string();
+            form.error = None;
+        });
+    }
+
+    {
+        let state = state.clone();
+        alias_entry.connect_changed(move |entry| {
+            let mut form = state.repository_form.borrow_mut();
+            form.alias = entry.text().to_string();
+            form.error = None;
+        });
+    }
+
+    {
+        let state = state.clone();
+        let repository_entry = repository_entry.clone();
+        let alias_entry = alias_entry.clone();
+        submit.connect_clicked(move |_| {
+            submit_repository_form(&state, &repository_entry, &alias_entry);
+        });
+    }
+
+    {
+        let state = state.clone();
+        let submit_repository_entry = repository_entry.clone();
+        let submit_alias_entry = alias_entry.clone();
+        repository_entry.clone().connect_activate(move |_| {
+            submit_repository_form(&state, &submit_repository_entry, &submit_alias_entry);
+        });
+    }
+
+    {
+        let state = state.clone();
+        let submit_repository_entry = repository_entry.clone();
+        let submit_alias_entry = alias_entry.clone();
+        alias_entry.clone().connect_activate(move |_| {
+            submit_repository_form(&state, &submit_repository_entry, &submit_alias_entry);
+        });
+    }
+
+    glib::idle_add_local_once(move || {
+        repository_entry.grab_focus();
+    });
+
+    card
+}
+
 fn build_repo_row(
     state: &Rc<AppState>,
     repo_label: &str,
     repo_canonical: &str,
     repo_status: Option<&str>,
-    collapsed: bool,
 ) -> GtkBox {
     let row = GtkBox::new(Orientation::Horizontal, 0);
     row.set_halign(Align::Fill);
@@ -557,30 +768,6 @@ fn build_repo_row(
         });
     }
 
-    let toggle_button = Button::new();
-    toggle_button.set_valign(Align::Center);
-    toggle_button.add_css_class("repo-toggle");
-    toggle_button.set_tooltip_text(Some(if collapsed {
-        "Expand repository"
-    } else {
-        "Collapse repository"
-    }));
-    let toggle_icon = Image::from_icon_name(if collapsed {
-        "pan-end-symbolic"
-    } else {
-        "pan-down-symbolic"
-    });
-    toggle_icon.set_pixel_size(14);
-    toggle_button.set_child(Some(&toggle_icon));
-
-    {
-        let state = state.clone();
-        let repo_canonical = repo_canonical.to_string();
-        toggle_button.connect_clicked(move |_| {
-            toggle_repo_collapsed_and_refresh(&state, &repo_canonical, collapsed);
-        });
-    }
-
     let hover = EventControllerMotion::new();
     {
         let row = row.clone();
@@ -598,7 +785,6 @@ fn build_repo_row(
 
     row.append(&sync_button);
     row.append(&button);
-    row.append(&toggle_button);
     row
 }
 
@@ -760,27 +946,6 @@ fn sync_repo_and_refresh(state: &Rc<AppState>, repo_canonical: &str) {
     }
 }
 
-fn toggle_repo_collapsed_and_refresh(state: &Rc<AppState>, repo_canonical: &str, collapsed: bool) {
-    let result = if collapsed {
-        expand_repository(repo_canonical)
-    } else {
-        collapse_repository(repo_canonical)
-    };
-
-    match result {
-        Ok(()) => {
-            *state.editing_workspace.borrow_mut() = None;
-            *state.selected_session.borrow_mut() = None;
-            schedule_refresh(state, None, None);
-        }
-        Err(err) => {
-            eprintln!("failed to toggle repository collapse: {err}");
-            let preferred_workspace = state.selected_workspace.borrow().clone();
-            schedule_refresh(state, preferred_workspace, None);
-        }
-    }
-}
-
 fn sidebar_append_static_row<W: IsA<Widget>>(list: &ListBox, widget: &W) {
     let row = ListBoxRow::new();
     row.set_selectable(false);
@@ -880,6 +1045,32 @@ fn remove_selected_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
         Err(err) => {
             eprintln!("failed to remove workspace: {err}");
             schedule_refresh(state, Some(workspace_ref), None);
+        }
+    }
+}
+
+fn submit_repository_form(state: &Rc<AppState>, repository_entry: &Entry, alias_entry: &Entry) {
+    let repository = repository_entry.text().trim().to_string();
+    let alias_text = alias_entry.text().trim().to_string();
+
+    {
+        let mut form = state.repository_form.borrow_mut();
+        form.repository = repository.clone();
+        form.alias = alias_text.clone();
+        form.error = None;
+    }
+
+    let alias = (!alias_text.is_empty()).then_some(alias_text.as_str());
+    let preferred_workspace = state.selected_workspace.borrow().clone();
+
+    match add_repository(&repository, alias) {
+        Ok(_) => {
+            *state.repository_form.borrow_mut() = RepositoryFormState::default();
+            schedule_refresh(state, preferred_workspace, None);
+        }
+        Err(err) => {
+            state.repository_form.borrow_mut().error = Some(err.to_string());
+            schedule_refresh(state, preferred_workspace, None);
         }
     }
 }

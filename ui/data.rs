@@ -140,6 +140,14 @@ pub fn create_workspace(
     })
 }
 
+pub fn add_repository(repository: &str, alias: Option<&str>) -> Result<Repository, SwarmError> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let repo_store = RepositoryStore::open().await?;
+        repo_store.add(repository, alias).await
+    })
+}
+
 pub fn sync_repository(repository: &str) -> Result<(), SwarmError> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
