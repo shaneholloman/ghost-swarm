@@ -358,7 +358,10 @@ impl WorkspaceStore {
         )
         .await?;
 
-        Ok(Workspace { branch, ..workspace })
+        Ok(Workspace {
+            branch,
+            ..workspace
+        })
     }
 
     async fn count_workspace_sessions(
