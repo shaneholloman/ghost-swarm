@@ -7,7 +7,7 @@ edition = "2024"
 path = "lib.rs"
 
 [features]
-default = []
+default = ["ui"]
 ui = ["dep:gtk", "dep:libghostty-vt"]
 
 [dependencies]
