@@ -587,9 +587,11 @@ impl DetailWidgets {
 
         {
             let state = state.clone();
+            let session_tabs = session_tabs.clone();
             session_stack.connect_visible_child_name_notify(move |stack| {
-                *state.selected_session.borrow_mut() =
-                    stack.visible_child_name().map(|name| name.to_string());
+                let selected_session = stack.visible_child_name().map(|name| name.to_string());
+                *state.selected_session.borrow_mut() = selected_session.clone();
+                sync_session_tab_active_state(&session_tabs, selected_session.as_deref());
             });
         }
 
@@ -670,6 +672,7 @@ impl DetailWidgets {
         for session in &workspace.sessions {
             let tab = build_session_tab(
                 state,
+                &self.session_tabs,
                 &workspace_ref,
                 &session_ids,
                 &session.id,
@@ -678,6 +681,7 @@ impl DetailWidgets {
             );
             self.session_tabs.append(&tab);
         }
+        sync_session_tab_active_state(&self.session_tabs, Some(&selected_session));
     }
 }
 
@@ -693,8 +697,26 @@ fn clear_stack(stack: &Stack) {
     }
 }
 
+fn sync_session_tab_active_state(session_tabs: &GtkBox, selected_session: Option<&str>) {
+    let mut child = session_tabs.first_child();
+    while let Some(widget) = child {
+        let next = widget.next_sibling();
+        if widget.has_css_class("session-tab") {
+            let is_active =
+                selected_session.is_some_and(|selected| widget.widget_name() == selected);
+            if is_active {
+                widget.add_css_class("session-tab-active");
+            } else {
+                widget.remove_css_class("session-tab-active");
+            }
+        }
+        child = next;
+    }
+}
+
 fn build_session_tab(
     state: &Rc<AppState>,
+    session_tabs: &GtkBox,
     workspace_ref: &str,
     session_ids: &[String],
     session_id: &str,
@@ -703,6 +725,7 @@ fn build_session_tab(
 ) -> GtkBox {
     let tab = GtkBox::new(Orientation::Horizontal, 0);
     tab.add_css_class("session-tab");
+    tab.set_widget_name(session_id);
     if active {
         tab.add_css_class("session-tab-active");
     }
@@ -713,10 +736,12 @@ fn build_session_tab(
     {
         let state = state.clone();
         let session_id = session_id.to_string();
+        let session_tabs = session_tabs.clone();
         let session_stack = session_stack.clone();
         select_button.connect_clicked(move |_| {
             *state.selected_session.borrow_mut() = Some(session_id.clone());
             session_stack.set_visible_child_name(&session_id);
+            sync_session_tab_active_state(&session_tabs, Some(&session_id));
         });
     }
 
