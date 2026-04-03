@@ -1,7 +1,7 @@
 use gtk::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Image, Label,
-    ListBox, ListBoxRow, Orientation, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION,
-    ScrolledWindow, SelectionMode, Stack, Widget, gdk,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry,
+    EventControllerMotion, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType,
+    STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, SelectionMode, Stack, Widget, gdk,
     gio::{self, FileMonitor, FileMonitorFlags},
     glib,
     prelude::*,
@@ -15,7 +15,7 @@ use crate::{
     data::{
         SessionEntry, WorkspaceEntry, WorkspaceGroup, close_session, create_session,
         create_workspace, current_workspace_branch, load_workspace_groups, remove_workspace,
-        rename_workspace, workspace_head_path,
+        rename_workspace, sync_repository, workspace_head_path,
     },
     ghostty,
 };
@@ -45,13 +45,6 @@ window {
   margin-bottom: 8px;
 }
 
-.repo-header {
-  color: #566172;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.09em;
-}
-
 .repo-add {
   min-width: 24px;
   min-height: 24px;
@@ -67,6 +60,40 @@ window {
 .repo-add:hover {
   background: rgba(126, 203, 255, 0.08);
   color: #e7f3ff;
+}
+
+.repo-sync {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: #7a8698;
+}
+
+.repo-sync:hover {
+  background: rgba(126, 203, 255, 0.08);
+  color: #e7f3ff;
+}
+
+.repo-header {
+  color: #566172;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+}
+
+.repo-status {
+  color: #6f7887;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  opacity: 0;
+}
+
+.repo-row-hover .repo-status {
+  opacity: 1;
 }
 
 .workspace-list {
@@ -354,7 +381,12 @@ fn build_sidebar(
     let rows = Rc::new(RefCell::new(Vec::<WorkspaceRow>::new()));
 
     for group in groups {
-        let repo_row = build_repo_row(&state, &group.repo_label, &group.repo_canonical);
+        let repo_row = build_repo_row(
+            &state,
+            &group.repo_label,
+            &group.repo_canonical,
+            group.repo_status.as_deref(),
+        );
         sidebar_append_static_row(&list, &repo_row);
 
         for workspace in &group.workspaces {
@@ -423,16 +455,54 @@ fn build_sidebar(
     sidebar
 }
 
-fn build_repo_row(state: &Rc<AppState>, repo_label: &str, repo_canonical: &str) -> GtkBox {
+fn build_repo_row(
+    state: &Rc<AppState>,
+    repo_label: &str,
+    repo_canonical: &str,
+    repo_status: Option<&str>,
+) -> GtkBox {
     let row = GtkBox::new(Orientation::Horizontal, 0);
     row.set_halign(Align::Fill);
     row.set_hexpand(true);
+    row.set_valign(Align::Center);
+    row.set_spacing(6);
     row.add_css_class("repo-row");
+
+    let copy = GtkBox::new(Orientation::Vertical, 0);
+    copy.set_hexpand(true);
+    copy.set_valign(Align::Center);
 
     let label = Label::new(Some(&repo_label.to_uppercase()));
     label.set_xalign(0.0);
-    label.set_hexpand(true);
+    label.set_valign(Align::Center);
     label.add_css_class("repo-header");
+    copy.append(&label);
+    row.append(&copy);
+
+    if let Some(repo_status) = repo_status {
+        let meta = Label::new(Some(repo_status));
+        meta.set_xalign(1.0);
+        meta.set_valign(Align::Center);
+        meta.add_css_class("repo-status");
+        meta.set_tooltip_text(Some(&format!("Last synced {repo_status}")));
+        row.append(&meta);
+    }
+
+    let sync_button = Button::new();
+    sync_button.set_valign(Align::Center);
+    sync_button.add_css_class("repo-sync");
+    sync_button.set_tooltip_text(Some("Sync repository"));
+    let sync_icon = Image::from_icon_name("view-refresh-symbolic");
+    sync_icon.set_pixel_size(14);
+    sync_button.set_child(Some(&sync_icon));
+
+    {
+        let state = state.clone();
+        let repo_canonical = repo_canonical.to_string();
+        sync_button.connect_clicked(move |_| {
+            sync_repo_and_refresh(&state, &repo_canonical);
+        });
+    }
 
     let button = Button::with_label("+");
     button.set_valign(Align::Center);
@@ -447,7 +517,22 @@ fn build_repo_row(state: &Rc<AppState>, repo_label: &str, repo_canonical: &str) 
         });
     }
 
-    row.append(&label);
+    let hover = EventControllerMotion::new();
+    {
+        let row = row.clone();
+        hover.connect_enter(move |_, _, _| {
+            row.add_css_class("repo-row-hover");
+        });
+    }
+    {
+        let row = row.clone();
+        hover.connect_leave(move |_| {
+            row.remove_css_class("repo-row-hover");
+        });
+    }
+    row.add_controller(hover);
+
+    row.append(&sync_button);
     row.append(&button);
     row
 }
@@ -592,6 +677,18 @@ fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
         }
         Err(err) => {
             eprintln!("failed to create workspace: {err}");
+        }
+    }
+}
+
+fn sync_repo_and_refresh(state: &Rc<AppState>, repo_canonical: &str) {
+    match sync_repository(repo_canonical) {
+        Ok(()) => {
+            let preferred_workspace = state.selected_workspace.borrow().clone();
+            schedule_refresh(state, preferred_workspace);
+        }
+        Err(err) => {
+            eprintln!("failed to sync repository: {err}");
         }
     }
 }
