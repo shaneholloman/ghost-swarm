@@ -941,6 +941,7 @@ impl DetailWidgets {
                 let selected_session = stack.visible_child_name().map(|name| name.to_string());
                 *state.selected_session.borrow_mut() = selected_session.clone();
                 sync_session_tab_active_state(&session_tabs, selected_session.as_deref());
+                focus_visible_terminal(stack);
             });
         }
 
@@ -1065,6 +1066,20 @@ fn sync_session_tab_active_state(session_tabs: &GtkBox, selected_session: Option
         }
         child = next;
     }
+}
+
+fn focus_visible_terminal(session_stack: &Stack) {
+    let Some(host) = session_stack.visible_child() else {
+        return;
+    };
+
+    glib::idle_add_local_once(move || {
+        if let Some(area) = host.first_child() {
+            area.grab_focus();
+        } else {
+            host.grab_focus();
+        }
+    });
 }
 
 fn build_session_tab(
