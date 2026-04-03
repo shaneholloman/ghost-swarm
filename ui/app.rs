@@ -1,6 +1,6 @@
 use gtk::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry,
-    EventControllerMotion, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType,
+    EventControllerMotion, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Spinner,
     STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, SelectionMode, Stack, Widget, gdk,
     gio::{self, FileMonitor, FileMonitorFlags},
     glib,
@@ -8,7 +8,10 @@ use gtk::{
 };
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     rc::Rc,
+    sync::mpsc,
+    time::Duration,
 };
 
 use crate::{
@@ -150,6 +153,11 @@ window {
 .repo-sync:hover {
   background: rgba(126, 203, 255, 0.08);
   color: #e7f3ff;
+}
+
+.repo-sync:disabled {
+  color: #a9d8ff;
+  opacity: 1;
 }
 
 .repo-header {
@@ -369,6 +377,7 @@ fn build_ui(app: &Application) {
         selected_session: RefCell::new(None),
         repository_form: RefCell::new(RepositoryFormState::default()),
         branch_monitors: RefCell::new(Vec::new()),
+        syncing_repositories: RefCell::new(HashSet::new()),
     });
     refresh_ui(&state, None, None);
 
@@ -382,6 +391,7 @@ struct AppState {
     selected_session: RefCell<Option<String>>,
     repository_form: RefCell<RepositoryFormState>,
     branch_monitors: RefCell<Vec<FileMonitor>>,
+    syncing_repositories: RefCell<HashSet<String>>,
 }
 
 #[derive(Clone, Default)]
@@ -483,11 +493,16 @@ fn build_sidebar(
     let rows = Rc::new(RefCell::new(Vec::<WorkspaceRow>::new()));
 
     for group in groups {
+        let is_syncing = state
+            .syncing_repositories
+            .borrow()
+            .contains(&group.repo_canonical);
         let repo_row = build_repo_row(
             &state,
             &group.repo_label,
             &group.repo_canonical,
             group.repo_status.as_deref(),
+            is_syncing,
         );
         sidebar_append_static_row(&list, &repo_row);
 
@@ -711,6 +726,7 @@ fn build_repo_row(
     repo_label: &str,
     repo_canonical: &str,
     repo_status: Option<&str>,
+    is_syncing: bool,
 ) -> GtkBox {
     let row = GtkBox::new(Orientation::Horizontal, 0);
     row.set_halign(Align::Fill);
@@ -730,22 +746,45 @@ fn build_repo_row(
     copy.append(&label);
     row.append(&copy);
 
-    if let Some(repo_status) = repo_status {
-        let meta = Label::new(Some(repo_status));
+    if is_syncing || repo_status.is_some() {
+        let meta_text = if is_syncing {
+            "Syncing ...".to_string()
+        } else {
+            repo_status
+                .expect("repo status should exist when not syncing")
+                .to_string()
+        };
+        let meta_tooltip = if is_syncing {
+            "Syncing ...".to_string()
+        } else {
+            format!("Last synced {meta_text}")
+        };
+        let meta = Label::new(Some(&meta_text));
         meta.set_xalign(1.0);
         meta.set_valign(Align::Center);
         meta.add_css_class("repo-status");
-        meta.set_tooltip_text(Some(&format!("Last synced {repo_status}")));
+        meta.set_tooltip_text(Some(&meta_tooltip));
         row.append(&meta);
     }
 
     let sync_button = Button::new();
     sync_button.set_valign(Align::Center);
     sync_button.add_css_class("repo-sync");
-    sync_button.set_tooltip_text(Some("Sync repository"));
-    let sync_icon = Image::from_icon_name("view-refresh-symbolic");
-    sync_icon.set_pixel_size(14);
-    sync_button.set_child(Some(&sync_icon));
+    sync_button.set_sensitive(!is_syncing);
+    sync_button.set_tooltip_text(Some(if is_syncing {
+        "Syncing ..."
+    } else {
+        "Sync repository"
+    }));
+    if is_syncing {
+        let spinner = Spinner::new();
+        spinner.start();
+        sync_button.set_child(Some(&spinner));
+    } else {
+        let sync_icon = Image::from_icon_name("view-refresh-symbolic");
+        sync_icon.set_pixel_size(14);
+        sync_button.set_child(Some(&sync_icon));
+    }
 
     {
         let state = state.clone();
@@ -934,16 +973,49 @@ fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
 }
 
 fn sync_repo_and_refresh(state: &Rc<AppState>, repo_canonical: &str) {
-    match sync_repository(repo_canonical) {
-        Ok(()) => {
-            let preferred_workspace = state.selected_workspace.borrow().clone();
-            let preferred_session = state.selected_session.borrow().clone();
-            schedule_refresh(state, preferred_workspace, preferred_session);
-        }
-        Err(err) => {
-            eprintln!("failed to sync repository: {err}");
-        }
+    if !state
+        .syncing_repositories
+        .borrow_mut()
+        .insert(repo_canonical.to_string())
+    {
+        return;
     }
+
+    let preferred_workspace = state.selected_workspace.borrow().clone();
+    let preferred_session = state.selected_session.borrow().clone();
+    let repo_canonical = repo_canonical.to_string();
+    schedule_refresh(state, preferred_workspace.clone(), preferred_session.clone());
+
+    let (sender, receiver) = mpsc::channel();
+    {
+        let repo_canonical = repo_canonical.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(sync_repository(&repo_canonical));
+        });
+    }
+
+    let state = state.clone();
+    glib::timeout_add_local(Duration::from_millis(50), move || match receiver.try_recv() {
+        Ok(result) => {
+            state.syncing_repositories.borrow_mut().remove(&repo_canonical);
+            match result {
+                Ok(()) => {
+                    schedule_refresh(&state, preferred_workspace.clone(), preferred_session.clone());
+                }
+                Err(err) => {
+                    eprintln!("failed to sync repository: {err}");
+                    schedule_refresh(&state, preferred_workspace.clone(), preferred_session.clone());
+                }
+            }
+            glib::ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            state.syncing_repositories.borrow_mut().remove(&repo_canonical);
+            schedule_refresh(&state, preferred_workspace.clone(), preferred_session.clone());
+            glib::ControlFlow::Break
+        }
+    });
 }
 
 fn sidebar_append_static_row<W: IsA<Widget>>(list: &ListBox, widget: &W) {
