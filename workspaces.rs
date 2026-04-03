@@ -20,6 +20,7 @@ pub struct Workspace {
     pub branch: String,
     pub path: PathBuf,
     pub created_at: i64,
+    pub archived_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,31 +52,12 @@ impl WorkspaceStore {
             .ok_or_else(|| SwarmError::RepositoryNotFound(repository.to_string()))?;
         let db = self.open_repo_db(&repo).await?;
         let default_branch = self.ensure_bare_repo(&repo)?;
-        let workspace_name = resolve_workspace_name(name, &default_branch)?;
-
-        if self
-            .find_workspace(&db, &repo, &workspace_name)
-            .await?
-            .is_some()
-        {
-            return Err(SwarmError::DuplicateWorkspace(format!(
-                "{}:{}",
-                repo.alias.as_deref().unwrap_or(&repo.name),
-                workspace_name
-            )));
-        }
-
+        let requested_name = resolve_workspace_name(name)?;
         let workspaces_dir = self.repos.workspaces_dir(&repo);
         fs::create_dir_all(&workspaces_dir)?;
+        let workspace_name =
+            Self::allocate_workspace_name(&db, &workspaces_dir, &requested_name).await?;
         let workspace_path = workspaces_dir.join(&workspace_name);
-
-        if workspace_path.exists() {
-            return Err(SwarmError::DuplicateWorkspace(format!(
-                "{}:{}",
-                repo.alias.as_deref().unwrap_or(&repo.name),
-                workspace_name
-            )));
-        }
 
         let bare_repo_path = self.repos.bare_repo_path(&repo);
         let branch = self.materialize_worktree(
@@ -104,6 +86,7 @@ impl WorkspaceStore {
             branch,
             path: workspace_path,
             created_at,
+            archived_at: None,
         })
     }
 
@@ -117,7 +100,7 @@ impl WorkspaceStore {
             .find_workspace(&db, &repo, &reference.workspace)
             .await?
             .ok_or_else(|| SwarmError::WorkspaceNotFound(workspace.to_string()))?;
-        let workspace_name = resolve_workspace_name(Some(name), &source.branch)?;
+        let workspace_name = resolve_workspace_name(Some(name))?;
 
         if self
             .find_workspace(&db, &repo, &workspace_name)
@@ -170,6 +153,7 @@ impl WorkspaceStore {
             branch,
             path: workspace_path,
             created_at,
+            archived_at: None,
         })
     }
 
@@ -182,8 +166,9 @@ impl WorkspaceStore {
         let db = self.open_repo_db(&repo).await?;
         let mut stmt = db
             .prepare(
-                "SELECT name, branch, path, created_at
+                "SELECT name, branch, path, created_at, archived_at
                  FROM workspaces
+                 WHERE archived_at IS NULL
                  ORDER BY created_at, name",
             )
             .await?;
@@ -198,6 +183,7 @@ impl WorkspaceStore {
                 branch: row.get::<String>(1)?,
                 path: PathBuf::from(row.get::<String>(2)?),
                 created_at: row.get::<i64>(3)?,
+                archived_at: row.get::<Option<i64>>(4)?, // <-- ADD THIS
             };
             workspaces.push(self.refresh_workspace_branch(&db, workspace).await?);
         }
@@ -227,26 +213,57 @@ impl WorkspaceStore {
             .find_workspace(&db, &repo, &reference.workspace)
             .await?
             .ok_or_else(|| SwarmError::WorkspaceNotFound(workspace.to_string()))?;
-        let bare_repo_path = self.repos.bare_repo_path(&repo);
 
-        run_git(
-            Some(&self.repos.repo_dir(&repo)),
-            [
-                format!("--git-dir={}", bare_repo_path.display()),
-                "worktree".to_string(),
-                "remove".to_string(),
-                "--force".to_string(),
-                workspace.path.display().to_string(),
-            ],
-        )?;
-
+        let archived_time = unix_timestamp();
         db.execute(
-            "DELETE FROM workspaces WHERE name = ?1",
-            [workspace.name.as_str()],
+            "UPDATE workspaces SET archived_at = ?2 WHERE name = ?1",
+            (workspace.name.as_str(), archived_time),
         )
         .await?;
 
-        Ok(workspace)
+        Ok(Workspace {
+            archived_at: Some(archived_time),
+            ..workspace
+        })
+    }
+    pub async fn prune(&self, repository: &str) -> Result<Vec<String>, SwarmError> {
+        let repo = self
+            .repos
+            .resolve_repository(repository)
+            .await?
+            .ok_or_else(|| SwarmError::RepositoryNotFound(repository.to_string()))?;
+        let db = self.open_repo_db(&repo).await?;
+        let mut stmt = db
+            .prepare("SELECT name, path FROM workspaces WHERE archived_at IS NOT NULL")
+            .await?;
+        let mut rows = stmt.query(()).await?;
+        let mut archived_workspaces = Vec::new();
+
+        while let Some(row) = rows.next().await? {
+            archived_workspaces.push((row.get::<String>(0)?, PathBuf::from(row.get::<String>(1)?)));
+        }
+
+        let mut pruned_names = Vec::new();
+        let bare_repo_path = self.repos.bare_repo_path(&repo);
+        for (name, path) in archived_workspaces {
+            run_git(
+                Some(&self.repos.repo_dir(&repo)),
+                [
+                    format!("--git-dir={}", bare_repo_path.display()),
+                    "worktree".to_string(),
+                    "remove".to_string(),
+                    "--force".to_string(),
+                    path.display().to_string(),
+                ],
+            )?;
+
+            db.execute("DELETE FROM workspaces WHERE name = ?1", [name.as_str()])
+                .await?;
+
+            pruned_names.push(name);
+        }
+
+        Ok(pruned_names)
     }
 
     pub async fn rename(&self, workspace: &str, new_name: &str) -> Result<Workspace, SwarmError> {
@@ -259,7 +276,7 @@ impl WorkspaceStore {
             .find_workspace(&db, &repo, &reference.workspace)
             .await?
             .ok_or_else(|| SwarmError::WorkspaceNotFound(workspace.to_string()))?;
-        let next_name = resolve_workspace_name(Some(new_name), &workspace.branch)?;
+        let next_name = resolve_workspace_name(Some(new_name))?;
 
         if next_name == workspace.name {
             return Ok(workspace);
@@ -330,6 +347,7 @@ impl WorkspaceStore {
             branch: next_name,
             path: next_path,
             created_at: workspace.created_at,
+            archived_at: workspace.archived_at,
         })
     }
 
@@ -383,9 +401,9 @@ impl WorkspaceStore {
     ) -> Result<Option<Workspace>, SwarmError> {
         let mut stmt = db
             .prepare(
-                "SELECT name, branch, path, created_at
+                "SELECT name, branch, path, created_at, archived_at
                  FROM workspaces
-                 WHERE name = ?1
+                 WHERE name = ?1 AND archived_at IS NULL
                  LIMIT 1",
             )
             .await?;
@@ -399,6 +417,7 @@ impl WorkspaceStore {
                 branch: row.get::<String>(1)?,
                 path: PathBuf::from(row.get::<String>(2)?),
                 created_at: row.get::<i64>(3)?,
+                archived_at: row.get::<Option<i64>>(4)?,
             };
             return Ok(Some(self.refresh_workspace_branch(db, workspace).await?));
         }
@@ -449,6 +468,48 @@ impl WorkspaceStore {
         }
 
         Ok(0)
+    }
+
+    async fn allocate_workspace_name(
+        db: &Connection,
+        workspaces_dir: &Path,
+        requested_name: &str,
+    ) -> Result<String, SwarmError> {
+        if !Self::workspace_name_exists(db, workspaces_dir, requested_name).await? {
+            return Ok(requested_name.to_string());
+        }
+
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{requested_name}-{suffix}");
+            if !Self::workspace_name_exists(db, workspaces_dir, &candidate).await? {
+                return Ok(candidate);
+            }
+
+            suffix += 1;
+        }
+    }
+
+    async fn workspace_name_exists(
+        db: &Connection,
+        workspaces_dir: &Path,
+        name: &str,
+    ) -> Result<bool, SwarmError> {
+        let mut stmt = db
+            .prepare(
+                "SELECT 1
+                 FROM workspaces
+                 WHERE name = ?1
+                 LIMIT 1",
+            )
+            .await?;
+        let mut rows = stmt.query([name]).await?;
+
+        if rows.next().await?.is_some() {
+            return Ok(true);
+        }
+
+        Ok(workspaces_dir.join(name).exists())
     }
 
     fn ensure_bare_repo(&self, repo: &Repository) -> Result<String, SwarmError> {
@@ -534,8 +595,8 @@ pub fn parse_workspace_reference(input: &str) -> Result<WorkspaceReference, Swar
     })
 }
 
-fn resolve_workspace_name(name: Option<&str>, default_branch: &str) -> Result<String, SwarmError> {
-    let workspace_name = name.unwrap_or(default_branch).trim();
+fn resolve_workspace_name(name: Option<&str>) -> Result<String, SwarmError> {
+    let workspace_name = name.unwrap_or("workspace").trim();
 
     if workspace_name.is_empty()
         || workspace_name.contains('/')
@@ -654,7 +715,8 @@ pub async fn migrate_repo_db(conn: &Connection, path: &Path) -> Result<(), Swarm
             name TEXT PRIMARY KEY,
             branch TEXT NOT NULL,
             path TEXT NOT NULL UNIQUE,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            archived_at INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -675,49 +737,20 @@ pub async fn migrate_repo_db(conn: &Connection, path: &Path) -> Result<(), Swarm
     .await
     .map_err(|err| database_error(path, "initialize schema", err))?;
 
-    let mut stmt = conn
-        .prepare("PRAGMA table_info(workspaces)")
-        .await
-        .map_err(|err| database_error(path, "inspect workspaces schema", err))?;
-    let mut rows = stmt
-        .query(())
-        .await
-        .map_err(|err| database_error(path, "inspect workspaces schema", err))?;
-    let mut columns = Vec::new();
+    let columns = table_columns(conn, "workspaces", path).await?;
 
-    while let Some(row) = rows.next().await? {
-        columns.push(row.get::<String>(1)?);
+    if columns == ["name", "branch", "path", "created_at"] {
+        conn.execute("ALTER TABLE workspaces ADD COLUMN archived_at INTEGER", ())
+            .await
+            .map_err(|err| database_error(path, "migrate workspaces schema", err))?;
+    } else if columns != ["name", "branch", "path", "created_at", "archived_at"] {
+        return Err(SwarmError::Io(std::io::Error::other(format!(
+            "unsupported workspaces schema columns: {}",
+            columns.join(", ")
+        ))));
     }
 
-    if columns != ["name", "branch", "path", "created_at"] {
-        conn.execute_batch(
-            "
-            DROP TABLE workspaces;
-            CREATE TABLE workspaces (
-                name TEXT PRIMARY KEY,
-                branch TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                created_at INTEGER NOT NULL
-            );
-            ",
-        )
-        .await
-        .map_err(|err| database_error(path, "migrate workspaces schema", err))?;
-    }
-
-    let mut stmt = conn
-        .prepare("PRAGMA table_info(sessions)")
-        .await
-        .map_err(|err| database_error(path, "inspect sessions schema", err))?;
-    let mut rows = stmt
-        .query(())
-        .await
-        .map_err(|err| database_error(path, "inspect sessions schema", err))?;
-    let mut session_columns = Vec::new();
-
-    while let Some(row) = rows.next().await? {
-        session_columns.push(row.get::<String>(1)?);
-    }
+    let session_columns = table_columns(conn, "sessions", path).await?;
 
     if session_columns
         != [
@@ -759,18 +792,44 @@ pub async fn migrate_repo_db(conn: &Connection, path: &Path) -> Result<(), Swarm
     Ok(())
 }
 
+async fn table_columns(
+    conn: &Connection,
+    table: &str,
+    path: &Path,
+) -> Result<Vec<String>, SwarmError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .await
+        .map_err(|err| database_error(path, &format!("inspect {table} schema"), err))?;
+    let mut rows = stmt
+        .query(())
+        .await
+        .map_err(|err| database_error(path, &format!("inspect {table} schema"), err))?;
+    let mut columns = Vec::new();
+
+    while let Some(row) = rows.next().await? {
+        columns.push(row.get::<String>(1)?);
+    }
+
+    Ok(columns)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
         path::PathBuf,
         process::Command,
+        sync::{Mutex, OnceLock},
         time::{SystemTime, UNIX_EPOCH},
     };
+    use turso::Builder;
 
     use super::{
-        build_clone_worktree_add_args, build_worktree_add_args, render_git_failure, run_git,
+        build_clone_worktree_add_args, build_worktree_add_args, migrate_repo_db,
+        render_git_failure, run_git,
     };
+    use crate::{SwarmError, repos::RepositoryStore, workspaces::WorkspaceStore};
 
     #[test]
     fn default_branch_workspace_is_reset_to_origin_tip() {
@@ -875,6 +934,183 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn migrate_repo_db_adds_archived_at_without_dropping_workspaces() {
+        let db_path = unique_temp_path("swarm-workspaces-db");
+        let db = Builder::new_local(db_path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+
+        conn.execute_batch(
+            "
+            CREATE TABLE workspaces (
+                name TEXT PRIMARY KEY,
+                branch TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                workspace_name TEXT NOT NULL,
+                command_json TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                log_path TEXT NOT NULL UNIQUE,
+                socket_path TEXT NOT NULL UNIQUE,
+                pid INTEGER,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                created_at INTEGER NOT NULL,
+                stopped_at INTEGER
+            );
+            ",
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, branch, path, created_at) VALUES (?1, ?2, ?3, ?4)",
+            ("main", "main", "/tmp/workspaces/main", 123_i64),
+        )
+        .await
+        .unwrap();
+
+        migrate_repo_db(&conn, &db_path).await.unwrap();
+
+        let mut stmt = conn.prepare("PRAGMA table_info(workspaces)").await.unwrap();
+        let mut rows = stmt.query(()).await.unwrap();
+        let mut columns = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            columns.push(row.get::<String>(1).unwrap());
+        }
+        assert_eq!(
+            columns,
+            vec!["name", "branch", "path", "created_at", "archived_at"]
+        );
+
+        let mut stmt = conn
+            .prepare("SELECT name, branch, path, created_at, archived_at FROM workspaces")
+            .await
+            .unwrap();
+        let mut rows = stmt.query(()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "main");
+        assert_eq!(row.get::<String>(1).unwrap(), "main");
+        assert_eq!(row.get::<String>(2).unwrap(), "/tmp/workspaces/main");
+        assert_eq!(row.get::<i64>(3).unwrap(), 123);
+        assert_eq!(row.get::<Option<i64>>(4).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_archived_row_when_git_remove_fails() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let data_home = unique_temp_path("swarm-test-data-home");
+        fs::create_dir_all(&data_home).unwrap();
+        let _env_guard = ScopedEnvVar::set("XDG_DATA_HOME", &data_home);
+
+        let result = async {
+            let repos = RepositoryStore::open().await.unwrap();
+            let repo = repos.add("github/penberg/swarm", None).await.unwrap();
+            let bare_repo_path = repos.bare_repo_path(&repo);
+            fs::create_dir_all(repos.repo_dir(&repo)).unwrap();
+            run_git(
+                Some(&repos.repo_dir(&repo)),
+                [
+                    "init".to_string(),
+                    "--bare".to_string(),
+                    bare_repo_path.display().to_string(),
+                ],
+            )
+            .unwrap();
+
+            let repo_db_path = repos.repo_db_path(&repo);
+            let db = Builder::new_local(repo_db_path.to_str().unwrap())
+                .build()
+                .await
+                .unwrap();
+            let conn = db.connect().unwrap();
+            migrate_repo_db(&conn, &repo_db_path).await.unwrap();
+            conn.execute(
+                "INSERT INTO workspaces (name, branch, path, created_at, archived_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                ("archived", "main", "/tmp/does-not-exist", 1_i64, 2_i64),
+            )
+            .await
+            .unwrap();
+
+            let store = WorkspaceStore::open().await.unwrap();
+            let err = store.prune("github/penberg/swarm").await.unwrap_err();
+            assert!(matches!(err, SwarmError::Git(_)));
+
+            let mut stmt = conn
+                .prepare("SELECT name FROM workspaces WHERE archived_at IS NOT NULL")
+                .await
+                .unwrap();
+            let mut rows = stmt.query(()).await.unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            assert_eq!(row.get::<String>(0).unwrap(), "archived");
+            assert!(rows.next().await.unwrap().is_none());
+        }
+        .await;
+
+        result
+    }
+
+    #[tokio::test]
+    async fn allocate_workspace_name_skips_archived_workspace_ids() {
+        let db_path = unique_temp_path("swarm-workspaces-db");
+        let db = Builder::new_local(db_path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        migrate_repo_db(&conn, &db_path).await.unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, branch, path, created_at, archived_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            ("main", "main", "/tmp/workspaces/main", 1_i64, 2_i64),
+        )
+        .await
+        .unwrap();
+
+        let workspaces_dir = unique_temp_path("swarm-workspaces-dir");
+        fs::create_dir_all(&workspaces_dir).unwrap();
+        assert_eq!(
+            WorkspaceStore::allocate_workspace_name(&conn, &workspaces_dir, "main")
+                .await
+                .unwrap(),
+            "main-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_name_exists_treats_archived_ids_as_taken() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let data_home = unique_temp_path("swarm-test-data-home");
+        fs::create_dir_all(&data_home).unwrap();
+        let _env_guard = ScopedEnvVar::set("XDG_DATA_HOME", &data_home);
+        let db_path = unique_temp_path("swarm-workspaces-db");
+        let db = Builder::new_local(db_path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        migrate_repo_db(&conn, &db_path).await.unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (name, branch, path, created_at, archived_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            ("main", "main", "/tmp/workspaces/main", 1_i64, 2_i64),
+        )
+        .await
+        .unwrap();
+
+        let workspaces_dir = unique_temp_path("swarm-workspaces-dir");
+        fs::create_dir_all(&workspaces_dir).unwrap();
+        assert!(
+            WorkspaceStore::workspace_name_exists(&conn, &workspaces_dir, "main")
+                .await
+                .unwrap()
+        );
+    }
+
     fn create_bare_repo(default_branch: &str) -> PathBuf {
         let repo_path = unique_temp_path("swarm-workspaces-test");
         fs::create_dir_all(&repo_path).unwrap();
@@ -935,6 +1171,41 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}-{nonce}"))
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: the caller serializes environment mutation with `env_lock`.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+
+            Self { key, original }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            // SAFETY: the caller serializes environment mutation with `env_lock`.
+            unsafe {
+                if let Some(value) = self.original.as_ref() {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
     }
 
     fn run_git_with_env<I, S, E, K, V>(envs: E, args: I) -> Result<String, String>

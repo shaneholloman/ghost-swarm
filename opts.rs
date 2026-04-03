@@ -124,5 +124,7 @@ pub struct PruneCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum PruneSubcommand {
+    All,
     Sessions,
+    Workspaces,
 }
