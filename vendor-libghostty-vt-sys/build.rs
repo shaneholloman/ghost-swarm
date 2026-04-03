@@ -1,6 +1,8 @@
-use std::env;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
@@ -82,22 +84,32 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static:+whole-archive=ghostty-vt");
 
-    let zig_cache_dir = ghostty_dir.join(".zig-cache");
-    emit_static_dep(&zig_cache_dir, "libsimdutf.a", "simdutf");
-    emit_static_dep(&zig_cache_dir, "libhighway.a", "highway");
-    emit_static_dep(&zig_cache_dir, "libutfcpp.a", "utfcpp");
+    let dep_search_roots = [
+        install_prefix.join("lib"),
+        ghostty_dir.join(".zig-cache"),
+        ghostty_dir.join("zig-out"),
+        out_dir.clone(),
+    ];
+    emit_static_dep(&dep_search_roots, "libsimdutf.a", "simdutf");
+    emit_static_dep(&dep_search_roots, "libhighway.a", "highway");
+    emit_static_dep(&dep_search_roots, "libutfcpp.a", "utfcpp");
 
     println!("cargo:rustc-link-lib=dylib=stdc++");
     println!("cargo:include={}", include_dir.display());
 }
 
-fn emit_static_dep(zig_cache_dir: &Path, archive_name: &str, lib_name: &str) {
-    if let Some(archive_path) = find_file(zig_cache_dir, archive_name) {
-        if let Some(parent) = archive_path.parent() {
-            println!("cargo:rustc-link-search=native={}", parent.display());
-            println!("cargo:rustc-link-lib=static={lib_name}");
+fn emit_static_dep(search_roots: &[PathBuf], archive_name: &str, lib_name: &str) {
+    for root in search_roots {
+        if let Some(archive_path) = find_file(root, archive_name) {
+            if let Some(parent) = archive_path.parent() {
+                println!("cargo:rustc-link-search=native={}", parent.display());
+                println!("cargo:rustc-link-lib=static={lib_name}");
+                return;
+            }
         }
     }
+
+    panic!("failed to locate {archive_name} in {}", format_search_roots(search_roots));
 }
 
 fn find_file(root: &Path, needle: &str) -> Option<PathBuf> {
@@ -122,6 +134,14 @@ fn find_file(root: &Path, needle: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+fn format_search_roots(search_roots: &[PathBuf]) -> String {
+    search_roots
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Clone ghostty at the pinned commit into OUT_DIR/ghostty-src.
