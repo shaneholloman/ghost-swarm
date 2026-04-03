@@ -1,9 +1,11 @@
 use gtk::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Label,
-    ListBox, ListBoxRow, Orientation, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION,
-    ScrolledWindow, SelectionMode, Stack, Widget, gdk,
+    gdk,
     gio::{self, FileMonitor, FileMonitorFlags},
-    glib, prelude::*,
+    glib,
+    prelude::*,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Label,
+    ListBox, ListBoxRow, Orientation, PolicyType, ScrolledWindow, SelectionMode, Stack, Widget,
+    STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -12,9 +14,9 @@ use std::{
 
 use crate::{
     data::{
-        SessionEntry, WorkspaceEntry, WorkspaceGroup, close_session, create_session,
-        create_workspace, current_workspace_branch, load_workspace_groups, rename_workspace,
-        workspace_head_path,
+        close_session, create_session, create_workspace, current_workspace_branch,
+        load_workspace_groups, rename_workspace, workspace_head_path, SessionEntry, WorkspaceEntry,
+        WorkspaceGroup,
     },
     ghostty,
 };
@@ -95,6 +97,16 @@ window {
 .workspace-meta {
   color: #6f7887;
   font-size: 11px;
+}
+
+.workspace-name-entry {
+  color: #6f7887;
+  font-size: 11px;
+  font-weight: 400;
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
 
 .session-toolbar {
@@ -405,38 +417,39 @@ fn build_workspace_row(
     let card = GtkBox::new(Orientation::Vertical, 4);
     card.add_css_class("workspace-card");
 
+    let branch = Label::new(Some(&workspace.branch));
+    branch.set_xalign(0.0);
+    branch.add_css_class("workspace-name");
+    card.append(&branch);
+
     if is_editing {
         let entry = Entry::new();
         entry.set_hexpand(true);
         entry.set_text(&workspace.name);
         entry.select_region(0, -1);
-        entry.add_css_class("workspace-name");
+        entry.add_css_class("workspace-name-entry");
         install_workspace_rename_handlers(&entry, state, workspace);
         card.append(&entry);
         glib::idle_add_local_once(move || {
             entry.grab_focus();
         });
     } else {
-        let name = Label::new(Some(&workspace.name));
-        name.set_xalign(0.0);
-        name.add_css_class("workspace-name");
-        card.append(&name);
+        let meta = Label::new(Some(&workspace_meta_text(
+            &workspace.name,
+            workspace.sessions.len(),
+        )));
+        meta.set_xalign(0.0);
+        meta.add_css_class("workspace-meta");
+        card.append(&meta);
     }
 
-    let meta = Label::new(Some(&workspace_meta_text(
-        &workspace.branch,
-        workspace.sessions.len(),
-    )));
-    meta.set_xalign(0.0);
-    meta.add_css_class("workspace-meta");
-    install_branch_monitor(state, workspace, &meta);
+    install_branch_monitor(state, workspace, &branch);
 
-    card.append(&meta);
     row.set_child(Some(&card));
     row
 }
 
-fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, meta: &Label) {
+fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, branch: &Label) {
     let head_path = match workspace_head_path(&workspace.path) {
         Ok(path) => path,
         Err(err) => {
@@ -450,22 +463,28 @@ fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, meta
     {
         Ok(monitor) => monitor,
         Err(err) => {
-            eprintln!("failed to watch workspace branch for {}: {err}", workspace.path);
+            eprintln!(
+                "failed to watch workspace branch for {}: {err}",
+                workspace.path
+            );
             return;
         }
     };
 
-    let label = meta.clone();
+    let label = branch.clone();
     let workspace_path = workspace.path.clone();
-    let session_count = workspace.sessions.len();
-    monitor.connect_changed(move |_, _, _, _| {
-        match current_workspace_branch(&workspace_path) {
-            Ok(branch) => label.set_text(&workspace_meta_text(&branch, session_count)),
+    monitor.connect_changed(
+        move |_, _, _, _| match current_workspace_branch(&workspace_path) {
+            Ok(branch) => label.set_text(&branch),
             Err(err) => eprintln!("failed to refresh branch for {workspace_path}: {err}"),
-        }
-    });
+        },
+    );
 
     state.branch_monitors.borrow_mut().push(monitor);
+}
+
+fn workspace_meta_text(name: &str, session_count: usize) -> String {
+    format!("{name}  •  {session_count} sessions")
 }
 
 fn build_content(detail_container: GtkBox) -> GtkBox {
@@ -596,10 +615,6 @@ fn next_workspace_placeholder() -> String {
     }
 
     "new".to_string()
-}
-
-fn workspace_meta_text(branch: &str, session_count: usize) -> String {
-    format!("{branch}  •  {session_count} sessions")
 }
 
 #[derive(Clone)]
