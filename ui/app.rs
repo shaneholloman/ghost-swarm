@@ -217,10 +217,6 @@ window {
   padding: 9px 10px 9px 0;
 }
 
-.workspace-action-slot {
-  min-width: 20px;
-}
-
 .workspace-action-slot-end {
   min-width: 20px;
 }
@@ -888,10 +884,14 @@ fn build_sidebar(
                     let is_selected = candidate.row == selected_row;
                     candidate.clone_button.set_visible(is_selected);
                     candidate.clone_button.set_sensitive(is_selected);
-                    candidate.delete_button.set_visible(is_selected);
-                    candidate.delete_button.set_sensitive(is_selected);
+                    if is_selected {
+                        if candidate.delete_button.parent().is_none() {
+                            candidate.delete_slot.append(&candidate.delete_button);
+                        }
+                    } else if candidate.delete_button.parent().is_some() {
+                        candidate.delete_slot.remove(&candidate.delete_button);
+                    }
                 }
-
                 rows.iter()
                     .find(|workspace_row| workspace_row.row == selected_row)
                     .map(|workspace_row| workspace_row.workspace.clone())
@@ -1202,11 +1202,11 @@ fn build_workspace_row(
     let container = GtkBox::new(Orientation::Horizontal, 0);
     container.set_hexpand(true);
     container.set_spacing(8);
+    container.set_margin_start(8);
 
     let delete_slot = GtkBox::new(Orientation::Horizontal, 0);
     delete_slot.set_valign(Align::Center);
     delete_slot.set_halign(Align::Center);
-    delete_slot.add_css_class("workspace-action-slot");
 
     let status_slot = GtkBox::new(Orientation::Horizontal, 0);
     status_slot.set_valign(Align::Center);
@@ -1243,8 +1243,6 @@ fn build_workspace_row(
     delete_button.set_tooltip_text(Some("Remove workspace"));
     delete_button.add_css_class("workspace-action");
     delete_button.add_css_class("workspace-delete");
-    delete_button.set_visible(is_selected);
-    delete_button.set_sensitive(is_selected);
 
     let icon = Image::from_icon_name("user-trash-symbolic");
     icon.set_pixel_size(12);
@@ -1258,7 +1256,9 @@ fn build_workspace_row(
         });
     }
 
-    delete_slot.append(&delete_button);
+    if is_selected {
+        delete_slot.append(&delete_button);
+    }
     clone_slot.append(&clone_button);
 
     let card = GtkBox::new(Orientation::Vertical, 4);
@@ -1287,6 +1287,7 @@ fn build_workspace_row(
             workspace.sessions.len(),
         )));
         meta.set_xalign(0.0);
+        meta.set_hexpand(true);
         meta.add_css_class("workspace-meta");
         card.append(&meta);
     }
@@ -1303,6 +1304,7 @@ fn build_workspace_row(
     WorkspaceRow {
         row,
         workspace: workspace.clone(),
+        delete_slot,
         clone_button,
         delete_button,
     }
@@ -1739,6 +1741,7 @@ struct DetailWidgets {
 struct WorkspaceRow {
     row: ListBoxRow,
     workspace: WorkspaceEntry,
+    delete_slot: GtkBox,
     clone_button: Button,
     delete_button: Button,
 }
