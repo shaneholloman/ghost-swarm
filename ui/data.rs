@@ -38,6 +38,7 @@ pub struct SessionEntry {
     pub command: String,
     pub log_path: String,
     pub socket_path: String,
+    pub pid: Option<u32>,
 }
 
 pub fn load_workspace_groups() -> Result<Vec<WorkspaceGroup>, SwarmError> {
@@ -66,6 +67,7 @@ pub fn load_workspace_groups() -> Result<Vec<WorkspaceGroup>, SwarmError> {
                         command: session.command.join(" "),
                         log_path: session.log_path.display().to_string(),
                         socket_path: session.socket_path.display().to_string(),
+                        pid: session.pid,
                     })
                     .collect::<Vec<_>>();
 
@@ -128,6 +130,7 @@ pub fn create_workspace(
                 command: session.command.join(" "),
                 log_path: session.log_path.display().to_string(),
                 socket_path: session.socket_path.display().to_string(),
+                pid: session.pid,
             })
             .collect::<Vec<_>>();
 
@@ -197,6 +200,7 @@ pub fn rename_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntr
                 command: session.command.join(" "),
                 log_path: session.log_path.display().to_string(),
                 socket_path: session.socket_path.display().to_string(),
+                pid: session.pid,
             })
             .collect::<Vec<_>>();
 
@@ -237,6 +241,7 @@ pub fn clone_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntry
                 command: session.command.join(" "),
                 log_path: session.log_path.display().to_string(),
                 socket_path: session.socket_path.display().to_string(),
+                pid: session.pid,
             })
             .collect::<Vec<_>>();
 
@@ -291,6 +296,7 @@ pub fn create_session(workspace_ref: &str) -> Result<SessionEntry, SwarmError> {
             command: session.command.join(" "),
             log_path: session.log_path.display().to_string(),
             socket_path: session.socket_path.display().to_string(),
+            pid: session.pid,
         })
     })
 }
@@ -308,6 +314,7 @@ pub fn close_session(session_id: &str) -> Result<SessionEntry, SwarmError> {
             command: session.command.join(" "),
             log_path: session.log_path.display().to_string(),
             socket_path: session.socket_path.display().to_string(),
+            pid: session.pid,
         })
     })
 }

@@ -13,9 +13,9 @@ use std::{
     cell::RefCell,
     f64,
     fmt::Write as _,
-    fs,
+    fs::{self, File},
     io::{self, Read, Write},
-    os::unix::net::UnixStream,
+    os::unix::{fs::OpenOptionsExt, io::AsRawFd, net::UnixStream},
     path::Path,
     rc::Rc,
     time::Duration,
@@ -184,6 +184,7 @@ struct SessionTerminalState {
     row_iterator: RowIterator<'static>,
     cell_iterator: CellIterator<'static>,
     socket: Option<UnixStream>,
+    session_pid: Option<u32>,
     sync_adjustment: bool,
     last_cols: u16,
     last_rows: u16,
@@ -234,6 +235,7 @@ impl SessionTerminalState {
             cell_iterator: CellIterator::new()
                 .expect("failed to create libghostty-vt cell iterator"),
             socket,
+            session_pid: session.pid,
             sync_adjustment: false,
             last_cols: DEFAULT_COLS,
             last_rows: DEFAULT_ROWS,
@@ -387,10 +389,36 @@ impl SessionTerminalState {
             self.cell_width.round() as u32,
             self.cell_height.round() as u32,
         );
+        self.resize_pty(cols, rows);
         if self.should_follow_output() {
             self.terminal.scroll_viewport(ScrollViewport::Bottom);
         }
         self.sync_scrollbar();
+    }
+
+    fn resize_pty(&self, cols: u16, rows: u16) {
+        let Some(pid) = self.session_pid else {
+            return;
+        };
+        let tty_path = format!("/proc/{pid}/fd/0");
+        let Ok(file) = File::options()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(&tty_path)
+        else {
+            return;
+        };
+
+        let mut winsize = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            libc::ioctl(file.as_raw_fd(), libc::TIOCSWINSZ, &mut winsize);
+        }
     }
 
     fn should_follow_output(&self) -> bool {
