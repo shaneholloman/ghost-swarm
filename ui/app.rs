@@ -851,11 +851,6 @@ fn build_sidebar(
         empty.set_xalign(0.0);
         empty.add_css_class("terminal-empty");
         sidebar_append_static_row(&list, &empty);
-    } else if rows.borrow().is_empty() {
-        let empty = Label::new(Some("No workspaces yet."));
-        empty.set_xalign(0.0);
-        empty.add_css_class("terminal-empty");
-        sidebar_append_static_row(&list, &empty);
     }
 
     {
