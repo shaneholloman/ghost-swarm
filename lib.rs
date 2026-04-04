@@ -1,4 +1,5 @@
 pub mod cmd;
+pub mod forges;
 pub mod opts;
 pub mod prune;
 pub mod repos;
