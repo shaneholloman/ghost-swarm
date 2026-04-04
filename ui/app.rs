@@ -21,14 +21,21 @@ use crate::{
     data::{
         SessionEntry, WorkspaceEntry, WorkspaceGroup, add_repository, clone_workspace,
         close_session, collapse_repository, create_session, create_workspace,
-        current_workspace_branch, expand_repository, load_session_programs, load_workspace_groups,
-        remove_workspace, rename_workspace, sync_repository, workspace_head_path,
+        current_workspace_branch, current_workspace_head, expand_repository, load_session_programs,
+        load_workspace_groups, remove_workspace, rename_workspace, sync_repository,
+        workspace_head_path,
     },
     ghostty,
 };
 
 const APP_ID: &str = "com.penberg.swarm.ui";
-const PR_STATUS_TTL: Duration = Duration::from_secs(60);
+const MAX_PENDING_PR_LOOKUPS: usize = 2;
+const SELECTED_PR_STATUS_TTL: Duration = Duration::from_secs(5);
+const PENDING_PR_STATUS_TTL: Duration = Duration::from_secs(15);
+const SETTLED_PR_STATUS_TTL: Duration = Duration::from_secs(180);
+const MERGED_PR_STATUS_TTL: Duration = Duration::from_secs(300);
+const NO_PR_STATUS_TTL: Duration = Duration::from_secs(300);
+const LOADING_PR_STATUS_TTL: Duration = Duration::from_secs(10);
 const STYLE: &str = r#"
 window {
   background: #0f1115;
@@ -477,6 +484,7 @@ fn build_ui(app: &Application) {
 
     install_session_cycle_shortcuts(&window, &state);
     install_pr_status_pump(&state);
+    install_pr_status_scheduler(&state);
     refresh_ui(&state, None, None);
 
     window.present();
@@ -510,6 +518,7 @@ struct RepositoryFormState {
 struct CachedPrStatus {
     state: WorkspacePrState,
     fetched_at: Instant,
+    head: Option<String>,
 }
 
 #[derive(Clone)]
@@ -522,6 +531,7 @@ enum WorkspacePrState {
 struct WorkspacePrUpdate {
     workspace_ref: String,
     status: Option<PullRequestStatus>,
+    head: Option<String>,
 }
 
 fn refresh_ui(
@@ -658,6 +668,7 @@ fn install_pr_status_pump(state: &Rc<AppState>) {
                             .map(WorkspacePrState::Ready)
                             .unwrap_or(WorkspacePrState::None),
                         fetched_at: Instant::now(),
+                        head: update.head,
                     },
                 );
                 changed = true;
@@ -672,20 +683,123 @@ fn install_pr_status_pump(state: &Rc<AppState>) {
     });
 }
 
+fn install_pr_status_scheduler(state: &Rc<AppState>) {
+    let state = state.clone();
+    glib::timeout_add_local(Duration::from_secs(1), move || {
+        schedule_due_pr_status_lookups(&state);
+        glib::ControlFlow::Continue
+    });
+}
+
 fn workspace_pr_snapshot(state: &Rc<AppState>, workspace: &WorkspaceEntry) -> WorkspacePrState {
     let workspace_id = workspace_ref(workspace);
     let cached = state.pr_statuses.borrow().get(&workspace_id).cloned();
-    let expired = cached
+    let is_selected = state
+        .selected_workspace
+        .borrow()
         .as_ref()
-        .is_some_and(|entry| entry.fetched_at.elapsed() >= PR_STATUS_TTL);
+        .is_some_and(|selected| selected == &workspace_id);
+    let head_changed = is_selected
+        && cached
+            .as_ref()
+            .is_some_and(|entry| workspace_pr_head_changed(entry, workspace));
+    let expired = cached.as_ref().is_some_and(|entry| {
+        entry.fetched_at.elapsed() >= pr_status_ttl(&entry.state, is_selected)
+    });
 
-    if cached.is_none() || expired {
+    if cached.is_none() || expired || head_changed {
         request_workspace_pr_status(state, workspace, cached.is_none());
     }
 
     cached
         .map(|entry| entry.state)
         .unwrap_or(WorkspacePrState::Loading)
+}
+
+fn schedule_due_pr_status_lookups(state: &Rc<AppState>) {
+    let available_slots =
+        MAX_PENDING_PR_LOOKUPS.saturating_sub(state.pending_pr_lookups.borrow().len());
+    if available_slots == 0 {
+        return;
+    }
+
+    let selected_workspace = state.selected_workspace.borrow().clone();
+    let groups = current_groups(state);
+    let due_workspaces = due_pr_status_workspaces(&groups, state, selected_workspace.as_deref());
+    for workspace in due_workspaces.into_iter().take(available_slots) {
+        request_workspace_pr_status(state, &workspace, false);
+    }
+}
+
+fn due_pr_status_workspaces(
+    groups: &[WorkspaceGroup],
+    state: &Rc<AppState>,
+    selected_workspace: Option<&str>,
+) -> Vec<WorkspaceEntry> {
+    let statuses = state.pr_statuses.borrow();
+    let pending = state.pending_pr_lookups.borrow();
+    let mut selected = Vec::new();
+    let mut rest = Vec::new();
+
+    for group in groups {
+        for workspace in &group.workspaces {
+            let workspace_id = workspace_ref(workspace);
+            if pending.contains(&workspace_id) {
+                continue;
+            }
+
+            let is_selected =
+                selected_workspace.is_some_and(|selected| selected == workspace_id.as_str());
+            let is_due = match statuses.get(&workspace_id) {
+                Some(entry) => {
+                    if is_selected && workspace_pr_head_changed(entry, workspace) {
+                        true
+                    } else {
+                        entry.fetched_at.elapsed() >= pr_status_ttl(&entry.state, is_selected)
+                    }
+                }
+                None => true,
+            };
+            if !is_due {
+                continue;
+            }
+
+            if is_selected {
+                selected.push(workspace.clone());
+            } else {
+                rest.push(workspace.clone());
+            }
+        }
+    }
+
+    selected.extend(rest);
+    selected
+}
+
+fn pr_status_ttl(state: &WorkspacePrState, is_selected: bool) -> Duration {
+    if is_selected {
+        return SELECTED_PR_STATUS_TTL;
+    }
+
+    match state {
+        WorkspacePrState::Loading => LOADING_PR_STATUS_TTL,
+        WorkspacePrState::None => NO_PR_STATUS_TTL,
+        WorkspacePrState::Ready(status) => match status.state {
+            PullRequestStatusState::Pending => PENDING_PR_STATUS_TTL,
+            PullRequestStatusState::Success | PullRequestStatusState::Failure => {
+                SETTLED_PR_STATUS_TTL
+            }
+            PullRequestStatusState::Merged => MERGED_PR_STATUS_TTL,
+        },
+    }
+}
+
+fn workspace_pr_head_changed(cached: &CachedPrStatus, workspace: &WorkspaceEntry) -> bool {
+    let Ok(current_head) = current_workspace_head(&workspace.path) else {
+        return false;
+    };
+
+    cached.head.as_deref() != Some(current_head.as_str())
 }
 
 fn request_workspace_pr_status(
@@ -708,6 +822,7 @@ fn request_workspace_pr_status(
             CachedPrStatus {
                 state: WorkspacePrState::Loading,
                 fetched_at: Instant::now(),
+                head: None,
             },
         );
     }
@@ -715,10 +830,12 @@ fn request_workspace_pr_status(
     let sender = state.pr_status_sender.clone();
     let workspace_path = workspace.path.clone();
     std::thread::spawn(move || {
+        let head = current_workspace_head(&workspace_path).ok();
         let status = github::workspace_pull_request_status(Path::new(&workspace_path));
         let _ = sender.send(WorkspacePrUpdate {
             workspace_ref: workspace_id,
             status,
+            head,
         });
     });
 }

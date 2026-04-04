@@ -335,6 +335,10 @@ pub fn current_workspace_branch(path: &str) -> Result<String, SwarmError> {
     run_git(path, ["rev-parse", "--short", "HEAD"])
 }
 
+pub fn current_workspace_head(path: &str) -> Result<String, SwarmError> {
+    run_git(Path::new(path), ["rev-parse", "HEAD"])
+}
+
 pub fn workspace_head_path(path: &str) -> Result<PathBuf, SwarmError> {
     let workspace_path = Path::new(path);
     let git_path = workspace_path.join(".git");
