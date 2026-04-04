@@ -1,7 +1,7 @@
 use gtk::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry,
-    EventControllerKey, EventControllerMotion, Image, Label, ListBox, ListBoxRow, Orientation,
-    PolicyType, PropagationPhase, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow,
+    EventControllerKey, EventControllerMotion, Grid, Image, Label, ListBox, ListBoxRow,
+    Orientation, PolicyType, PropagationPhase, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow,
     SelectionMode, Spinner, Stack, Widget, gdk,
     gio::{self, FileMonitor, FileMonitorFlags},
     glib,
@@ -217,16 +217,12 @@ window {
   padding: 9px 10px 9px 0;
 }
 
-.workspace-action-slot {
-  min-width: 20px;
-}
-
 .workspace-action-slot-end {
   min-width: 20px;
 }
 
 .workspace-status-slot {
-  min-width: 20px;
+  min-width: 8px;
 }
 
 .workspace-pr-indicator {
@@ -891,7 +887,6 @@ fn build_sidebar(
                     candidate.delete_button.set_visible(is_selected);
                     candidate.delete_button.set_sensitive(is_selected);
                 }
-
                 rows.iter()
                     .find(|workspace_row| workspace_row.row == selected_row)
                     .map(|workspace_row| workspace_row.workspace.clone())
@@ -1199,14 +1194,11 @@ fn build_workspace_row(
     row.set_activatable(true);
     row.add_css_class("workspace-row");
 
-    let container = GtkBox::new(Orientation::Horizontal, 0);
+    let container = Grid::new();
     container.set_hexpand(true);
-    container.set_spacing(8);
-
-    let delete_slot = GtkBox::new(Orientation::Horizontal, 0);
-    delete_slot.set_valign(Align::Center);
-    delete_slot.set_halign(Align::Center);
-    delete_slot.add_css_class("workspace-action-slot");
+    container.set_column_spacing(16);
+    container.set_row_spacing(4);
+    container.set_margin_start(4);
 
     let status_slot = GtkBox::new(Orientation::Horizontal, 0);
     status_slot.set_valign(Align::Center);
@@ -1245,6 +1237,7 @@ fn build_workspace_row(
     delete_button.add_css_class("workspace-delete");
     delete_button.set_visible(is_selected);
     delete_button.set_sensitive(is_selected);
+    delete_button.set_margin_end(8);
 
     let icon = Image::from_icon_name("user-trash-symbolic");
     icon.set_pixel_size(12);
@@ -1258,17 +1251,13 @@ fn build_workspace_row(
         });
     }
 
-    delete_slot.append(&delete_button);
+    clone_slot.append(&delete_button);
     clone_slot.append(&clone_button);
-
-    let card = GtkBox::new(Orientation::Vertical, 4);
-    card.set_hexpand(true);
-    card.add_css_class("workspace-card");
 
     let branch = Label::new(Some(&workspace.branch));
     branch.set_xalign(0.0);
+    branch.set_hexpand(true);
     branch.add_css_class("workspace-name");
-    card.append(&branch);
 
     if is_editing {
         let entry = Entry::new();
@@ -1277,7 +1266,7 @@ fn build_workspace_row(
         entry.select_region(0, -1);
         entry.add_css_class("workspace-name-entry");
         install_workspace_rename_handlers(&entry, state, workspace);
-        card.append(&entry);
+        container.attach(&entry, 1, 1, 1, 1);
         glib::idle_add_local_once(move || {
             entry.grab_focus();
         });
@@ -1287,17 +1276,17 @@ fn build_workspace_row(
             workspace.sessions.len(),
         )));
         meta.set_xalign(0.0);
+        meta.set_hexpand(true);
         meta.add_css_class("workspace-meta");
-        card.append(&meta);
+        container.attach(&meta, 1, 1, 1, 1);
     }
 
     install_branch_monitor(state, workspace, &branch);
 
-    container.append(&delete_slot);
     status_slot.append(&build_workspace_status_indicator(state, workspace));
-    container.append(&status_slot);
-    container.append(&card);
-    container.append(&clone_slot);
+    container.attach(&status_slot, 0, 0, 1, 2);
+    container.attach(&branch, 1, 0, 1, 1);
+    container.attach(&clone_slot, 2, 0, 1, 2);
     row.set_child(Some(&container));
 
     WorkspaceRow {
