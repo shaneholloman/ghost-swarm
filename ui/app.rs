@@ -1119,8 +1119,7 @@ fn build_content(detail_container: GtkBox) -> GtkBox {
 }
 
 fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
-    let placeholder = next_workspace_placeholder();
-    match create_workspace(repo_canonical, Some(&placeholder)) {
+    match create_workspace(repo_canonical, None) {
         Ok(workspace) => {
             let workspace_ref = workspace_ref(&workspace);
             *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
@@ -1394,7 +1393,6 @@ fn next_workspace_clone_name(workspace: &WorkspaceEntry) -> String {
     let _ = workspace;
     next_workspace_placeholder()
 }
-
 #[derive(Clone)]
 struct DetailWidgets {
     container: GtkBox,
