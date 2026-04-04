@@ -1,6 +1,6 @@
 use gtk::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry,
-    EventControllerKey, EventControllerMotion, Grid, Image, Label, ListBox, ListBoxRow,
+    EventControllerKey, EventControllerMotion, Grid, Image, Label, LinkButton, ListBox, ListBoxRow,
     Orientation, PolicyType, PropagationPhase, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow,
     SelectionMode, Spinner, Stack, Widget, gdk,
     gio::{self, FileMonitor, FileMonitorFlags},
@@ -299,8 +299,23 @@ window {
   margin-bottom: 12px;
 }
 
+.session-toolbar-spacer {
+  min-width: 0;
+}
+
 .session-tabs {
   spacing: 0;
+}
+
+.session-pr-link {
+  color: #8fcaff;
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.session-pr-link:hover {
+  color: #d7eeff;
 }
 
 .session-tab {
@@ -1722,6 +1737,7 @@ struct DetailWidgets {
     container: GtkBox,
     session_toolbar: GtkBox,
     session_tabs: GtkBox,
+    session_toolbar_spacer: GtkBox,
     session_stack: Stack,
 }
 
@@ -1739,7 +1755,8 @@ impl DetailWidgets {
         container.set_vexpand(true);
 
         let session_toolbar = GtkBox::new(Orientation::Horizontal, 8);
-        session_toolbar.set_halign(Align::Start);
+        session_toolbar.set_halign(Align::Fill);
+        session_toolbar.set_hexpand(true);
         session_toolbar.add_css_class("session-toolbar");
 
         let session_stack = Stack::new();
@@ -1749,6 +1766,10 @@ impl DetailWidgets {
         let session_tabs = GtkBox::new(Orientation::Horizontal, 6);
         session_tabs.set_halign(Align::Start);
         session_tabs.add_css_class("session-tabs");
+
+        let session_toolbar_spacer = GtkBox::new(Orientation::Horizontal, 0);
+        session_toolbar_spacer.set_hexpand(true);
+        session_toolbar_spacer.add_css_class("session-toolbar-spacer");
 
         {
             let state = state.clone();
@@ -1769,6 +1790,7 @@ impl DetailWidgets {
             container,
             session_toolbar,
             session_tabs,
+            session_toolbar_spacer,
             session_stack,
         }
     }
@@ -1801,6 +1823,13 @@ impl DetailWidgets {
             });
         }
         self.session_toolbar.append(&add_button);
+        self.session_toolbar.append(&self.session_toolbar_spacer);
+
+        if let WorkspacePrState::Ready(status) = workspace_pr_snapshot(state, workspace) {
+            if let Some(link) = build_workspace_pr_link(&status) {
+                self.session_toolbar.append(&link);
+            }
+        }
 
         if workspace.sessions.is_empty() {
             let empty = ghostty::terminal_host(&SessionEntry {
@@ -1856,6 +1885,19 @@ impl DetailWidgets {
         sync_session_tab_active_state(&self.session_tabs, Some(&selected_session));
         install_session_tab_refresh(&self.session_tabs, &workspace_ref);
     }
+}
+
+fn build_workspace_pr_link(status: &PullRequestStatus) -> Option<LinkButton> {
+    let url = status.url.as_deref()?;
+    let link = LinkButton::builder()
+        .uri(url)
+        .label(format!("PR #{}", status.number))
+        .halign(Align::End)
+        .valign(Align::Center)
+        .build();
+    link.add_css_class("session-pr-link");
+    link.set_tooltip_text(Some(url));
+    Some(link)
 }
 
 fn clear_box(container: &GtkBox) {
