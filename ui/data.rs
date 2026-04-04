@@ -6,7 +6,6 @@ use std::{
 };
 use swarm::{
     SwarmError,
-    forges::github::{self, PullRequestStatus, PullRequestStatusState},
     repos::{Repository, RepositoryStore},
     sessions::{SessionStore, default_session_command},
     workspaces::{Workspace, WorkspaceStore},
@@ -29,23 +28,7 @@ pub struct WorkspaceEntry {
     pub name: String,
     pub branch: String,
     pub path: String,
-    pub pull_request: Option<WorkspacePullRequest>,
     pub sessions: Vec<SessionEntry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct WorkspacePullRequest {
-    pub state: WorkspacePullRequestState,
-    pub summary: String,
-    pub url: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspacePullRequestState {
-    Success,
-    Pending,
-    Failure,
-    Merged,
 }
 
 #[derive(Debug, Clone)]
@@ -357,29 +340,13 @@ fn map_workspace(
     workspace: Workspace,
     sessions: Vec<SessionEntry>,
 ) -> WorkspaceEntry {
-    let pull_request = github::workspace_pull_request_status(&workspace.path).map(map_pull_request);
-
     WorkspaceEntry {
         repo_label: repo_label.to_string(),
         repo_canonical: repo_canonical.to_string(),
         name: workspace.name,
         branch: workspace.branch,
         path: workspace.path.display().to_string(),
-        pull_request,
         sessions,
-    }
-}
-
-fn map_pull_request(status: PullRequestStatus) -> WorkspacePullRequest {
-    WorkspacePullRequest {
-        state: match status.state {
-            PullRequestStatusState::Success => WorkspacePullRequestState::Success,
-            PullRequestStatusState::Pending => WorkspacePullRequestState::Pending,
-            PullRequestStatusState::Failure => WorkspacePullRequestState::Failure,
-            PullRequestStatusState::Merged => WorkspacePullRequestState::Merged,
-        },
-        summary: status.summary,
-        url: status.url,
     }
 }
 

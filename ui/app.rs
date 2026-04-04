@@ -9,16 +9,18 @@ use gtk::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
+    path::Path,
     rc::Rc,
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
+use swarm::forges::github::{self, PullRequestStatus, PullRequestStatusState};
 
 use crate::{
     data::{
-        SessionEntry, WorkspaceEntry, WorkspaceGroup, WorkspacePullRequestState, add_repository,
-        clone_workspace, close_session, collapse_repository, create_session, create_workspace,
+        SessionEntry, WorkspaceEntry, WorkspaceGroup, add_repository, clone_workspace,
+        close_session, collapse_repository, create_session, create_workspace,
         current_workspace_branch, expand_repository, load_workspace_groups, remove_workspace,
         rename_workspace, sync_repository, workspace_head_path,
     },
@@ -26,6 +28,7 @@ use crate::{
 };
 
 const APP_ID: &str = "com.penberg.swarm.ui";
+const PR_STATUS_TTL: Duration = Duration::from_secs(60);
 const STYLE: &str = r#"
 window {
   background: #0f1115;
@@ -429,29 +432,59 @@ fn build_ui(app: &Application) {
         .default_height(920)
         .build();
 
+    let shell = GtkBox::new(Orientation::Horizontal, 0);
+    shell.add_css_class("app-shell");
+    let sidebar_host = GtkBox::new(Orientation::Vertical, 0);
+    let content_host = GtkBox::new(Orientation::Vertical, 0);
+    content_host.set_hexpand(true);
+    content_host.set_vexpand(true);
+    let (pr_status_sender, pr_status_receiver) = mpsc::channel();
+
     let state = Rc::new(AppState {
-        window: window.clone(),
+        sidebar_host: sidebar_host.clone(),
+        detail_widgets: RefCell::new(None),
+        workspace_groups: RefCell::new(Vec::new()),
         selected_workspace: RefCell::new(None),
         editing_workspace: RefCell::new(None),
         selected_session: RefCell::new(None),
         repository_form: RefCell::new(RepositoryFormState::default()),
         branch_monitors: RefCell::new(Vec::new()),
         syncing_repositories: RefCell::new(HashSet::new()),
+        pr_statuses: RefCell::new(HashMap::new()),
+        pending_pr_lookups: RefCell::new(HashSet::new()),
+        pr_status_sender,
+        pr_status_receiver: RefCell::new(pr_status_receiver),
     });
+
+    let detail_widgets = DetailWidgets::new(&state);
+    let content = build_content(detail_widgets.container.clone());
+    *state.detail_widgets.borrow_mut() = Some(detail_widgets);
+    content_host.append(&content);
+    shell.append(&sidebar_host);
+    shell.append(&content_host);
+    window.set_child(Some(&shell));
+
     install_session_cycle_shortcuts(&window, &state);
+    install_pr_status_pump(&state);
     refresh_ui(&state, None, None);
 
     window.present();
 }
 
 struct AppState {
-    window: ApplicationWindow,
+    sidebar_host: GtkBox,
+    detail_widgets: RefCell<Option<DetailWidgets>>,
+    workspace_groups: RefCell<Vec<WorkspaceGroup>>,
     selected_workspace: RefCell<Option<String>>,
     editing_workspace: RefCell<Option<String>>,
     selected_session: RefCell<Option<String>>,
     repository_form: RefCell<RepositoryFormState>,
     branch_monitors: RefCell<Vec<FileMonitor>>,
     syncing_repositories: RefCell<HashSet<String>>,
+    pr_statuses: RefCell<HashMap<String, CachedPrStatus>>,
+    pending_pr_lookups: RefCell<HashSet<String>>,
+    pr_status_sender: mpsc::Sender<WorkspacePrUpdate>,
+    pr_status_receiver: RefCell<mpsc::Receiver<WorkspacePrUpdate>>,
 }
 
 #[derive(Clone, Default)]
@@ -460,6 +493,24 @@ struct RepositoryFormState {
     repository: String,
     alias: String,
     error: Option<String>,
+}
+
+#[derive(Clone)]
+struct CachedPrStatus {
+    state: WorkspacePrState,
+    fetched_at: Instant,
+}
+
+#[derive(Clone)]
+enum WorkspacePrState {
+    Loading,
+    None,
+    Ready(PullRequestStatus),
+}
+
+struct WorkspacePrUpdate {
+    workspace_ref: String,
+    status: Option<PullRequestStatus>,
 }
 
 fn refresh_ui(
@@ -475,16 +526,27 @@ fn refresh_ui(
             return;
         }
     };
+    *state.workspace_groups.borrow_mut() = groups.clone();
+    render_ui(state, &groups, preferred_workspace, preferred_session);
+}
 
+fn render_ui(
+    state: &Rc<AppState>,
+    groups: &[WorkspaceGroup],
+    preferred_workspace: Option<String>,
+    preferred_session: Option<String>,
+) {
     let selected_workspace = preferred_workspace
         .or_else(|| state.selected_workspace.borrow().clone())
-        .and_then(|workspace_ref| find_workspace_by_ref(&groups, &workspace_ref))
-        .or_else(|| first_workspace(&groups));
+        .and_then(|workspace_ref| find_workspace_by_ref(groups, &workspace_ref))
+        .or_else(|| first_workspace(groups));
 
-    let shell = GtkBox::new(Orientation::Horizontal, 0);
-    shell.add_css_class("app-shell");
-
-    let detail_widgets = DetailWidgets::new(state);
+    let detail_widgets = state
+        .detail_widgets
+        .borrow()
+        .as_ref()
+        .cloned()
+        .expect("detail widgets initialized");
     if let Some(workspace) = selected_workspace.as_ref() {
         detail_widgets.render_workspace(workspace, state, preferred_session.as_deref());
         *state.selected_workspace.borrow_mut() = Some(workspace_ref(workspace));
@@ -496,16 +558,13 @@ fn refresh_ui(
     }
 
     let sidebar = build_sidebar(
-        &groups,
+        groups,
         state.clone(),
         detail_widgets.clone(),
         selected_workspace,
     );
-    let content = build_content(detail_widgets.container.clone());
-
-    shell.append(&sidebar);
-    shell.append(&content);
-    state.window.set_child(Some(&shell));
+    clear_box(&state.sidebar_host);
+    state.sidebar_host.append(&sidebar);
 }
 
 fn schedule_refresh(
@@ -517,6 +576,145 @@ fn schedule_refresh(
     glib::idle_add_local_once(move || {
         refresh_ui(&state, preferred_workspace, preferred_session);
     });
+}
+
+fn current_groups(state: &Rc<AppState>) -> Vec<WorkspaceGroup> {
+    state.workspace_groups.borrow().clone()
+}
+
+fn render_current_ui(
+    state: &Rc<AppState>,
+    preferred_workspace: Option<String>,
+    preferred_session: Option<String>,
+) {
+    let groups = current_groups(state);
+    render_ui(state, &groups, preferred_workspace, preferred_session);
+}
+
+fn render_sidebar_only(state: &Rc<AppState>) {
+    let groups = current_groups(state);
+    let selected_workspace = state
+        .selected_workspace
+        .borrow()
+        .clone()
+        .and_then(|workspace_ref| find_workspace_by_ref(&groups, &workspace_ref))
+        .or_else(|| first_workspace(&groups));
+    let detail_widgets = state
+        .detail_widgets
+        .borrow()
+        .as_ref()
+        .cloned()
+        .expect("detail widgets initialized");
+    let sidebar = build_sidebar(&groups, state.clone(), detail_widgets, selected_workspace);
+    clear_box(&state.sidebar_host);
+    state.sidebar_host.append(&sidebar);
+}
+
+fn schedule_render_sidebar_only(state: &Rc<AppState>) {
+    let state = state.clone();
+    glib::idle_add_local_once(move || {
+        render_sidebar_only(&state);
+    });
+}
+
+fn schedule_render_current_ui(
+    state: &Rc<AppState>,
+    preferred_workspace: Option<String>,
+    preferred_session: Option<String>,
+) {
+    let state = state.clone();
+    glib::idle_add_local_once(move || {
+        render_current_ui(&state, preferred_workspace, preferred_session);
+    });
+}
+
+fn install_pr_status_pump(state: &Rc<AppState>) {
+    let state = state.clone();
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        let mut changed = false;
+        {
+            let receiver = state.pr_status_receiver.borrow_mut();
+            while let Ok(update) = receiver.try_recv() {
+                state
+                    .pending_pr_lookups
+                    .borrow_mut()
+                    .remove(&update.workspace_ref);
+                state.pr_statuses.borrow_mut().insert(
+                    update.workspace_ref,
+                    CachedPrStatus {
+                        state: update
+                            .status
+                            .map(WorkspacePrState::Ready)
+                            .unwrap_or(WorkspacePrState::None),
+                        fetched_at: Instant::now(),
+                    },
+                );
+                changed = true;
+            }
+        }
+
+        if changed {
+            render_sidebar_only(&state);
+        }
+
+        glib::ControlFlow::Continue
+    });
+}
+
+fn workspace_pr_snapshot(state: &Rc<AppState>, workspace: &WorkspaceEntry) -> WorkspacePrState {
+    let workspace_id = workspace_ref(workspace);
+    let cached = state.pr_statuses.borrow().get(&workspace_id).cloned();
+    let expired = cached
+        .as_ref()
+        .is_some_and(|entry| entry.fetched_at.elapsed() >= PR_STATUS_TTL);
+
+    if cached.is_none() || expired {
+        request_workspace_pr_status(state, workspace, cached.is_none());
+    }
+
+    cached
+        .map(|entry| entry.state)
+        .unwrap_or(WorkspacePrState::Loading)
+}
+
+fn request_workspace_pr_status(
+    state: &Rc<AppState>,
+    workspace: &WorkspaceEntry,
+    mark_loading: bool,
+) {
+    let workspace_id = workspace_ref(workspace);
+    if state.pending_pr_lookups.borrow().contains(&workspace_id) {
+        return;
+    }
+
+    state
+        .pending_pr_lookups
+        .borrow_mut()
+        .insert(workspace_id.clone());
+    if mark_loading {
+        state.pr_statuses.borrow_mut().insert(
+            workspace_id.clone(),
+            CachedPrStatus {
+                state: WorkspacePrState::Loading,
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+
+    let sender = state.pr_status_sender.clone();
+    let workspace_path = workspace.path.clone();
+    std::thread::spawn(move || {
+        let status = github::workspace_pull_request_status(Path::new(&workspace_path));
+        let _ = sender.send(WorkspacePrUpdate {
+            workspace_ref: workspace_id,
+            status,
+        });
+    });
+}
+
+fn clear_workspace_pr_status(state: &Rc<AppState>, workspace_ref: &str) {
+    state.pr_statuses.borrow_mut().remove(workspace_ref);
+    state.pending_pr_lookups.borrow_mut().remove(workspace_ref);
 }
 
 fn install_session_cycle_shortcuts(window: &ApplicationWindow, state: &Rc<AppState>) {
@@ -548,13 +746,7 @@ fn cycle_selected_session(state: &Rc<AppState>, direction: isize) {
         return;
     };
 
-    let groups = match load_workspace_groups() {
-        Ok(groups) => groups,
-        Err(err) => {
-            eprintln!("failed to load workspaces: {err}");
-            return;
-        }
-    };
+    let groups = current_groups(state);
 
     let Some(workspace) = find_workspace_by_ref(&groups, &workspace_ref) else {
         return;
@@ -1092,7 +1284,7 @@ fn build_workspace_row(
     install_branch_monitor(state, workspace, &branch);
 
     container.append(&delete_slot);
-    status_slot.append(&build_workspace_pr_indicator(workspace));
+    status_slot.append(&build_workspace_status_indicator(state, workspace));
     container.append(&status_slot);
     container.append(&card);
     container.append(&clone_slot);
@@ -1106,24 +1298,29 @@ fn build_workspace_row(
     }
 }
 
-fn build_workspace_pr_indicator(workspace: &WorkspaceEntry) -> Widget {
+fn build_workspace_status_indicator(state: &Rc<AppState>, workspace: &WorkspaceEntry) -> Widget {
     let indicator = GtkBox::new(Orientation::Horizontal, 0);
     indicator.add_css_class("workspace-pr-indicator");
-    if let Some(pull_request) = workspace.pull_request.as_ref() {
-        indicator.add_css_class(match pull_request.state {
-            WorkspacePullRequestState::Success => "workspace-pr-success",
-            WorkspacePullRequestState::Pending => "workspace-pr-pending",
-            WorkspacePullRequestState::Failure => "workspace-pr-failure",
-            WorkspacePullRequestState::Merged => "workspace-pr-merged",
-        });
-        indicator.set_tooltip_text(Some(&pull_request.summary));
-        if let Some(url) = &pull_request.url {
-            indicator.set_tooltip_text(Some(&format!("{}\n{}", pull_request.summary, url)));
+    match workspace_pr_snapshot(state, workspace) {
+        WorkspacePrState::Loading => {
+            indicator.set_tooltip_text(Some("Loading pull request status..."));
         }
-    } else {
-        indicator.set_tooltip_text(Some("No pull request"));
+        WorkspacePrState::None => {
+            indicator.set_tooltip_text(Some("No pull request"));
+        }
+        WorkspacePrState::Ready(status) => {
+            indicator.add_css_class(match status.state {
+                PullRequestStatusState::Success => "workspace-pr-success",
+                PullRequestStatusState::Pending => "workspace-pr-pending",
+                PullRequestStatusState::Failure => "workspace-pr-failure",
+                PullRequestStatusState::Merged => "workspace-pr-merged",
+            });
+            indicator.set_tooltip_text(Some(&status.summary));
+            if let Some(url) = &status.url {
+                indicator.set_tooltip_text(Some(&format!("{}\n{}", status.summary, url)));
+            }
+        }
     }
-
     indicator.upcast()
 }
 
@@ -1150,11 +1347,17 @@ fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, bran
     };
 
     let label = branch.clone();
+    let monitor_state = state.clone();
+    let workspace_ref = workspace_ref(workspace);
     let workspace_path = workspace.path.clone();
     let session_count = workspace.sessions.len();
     monitor.connect_changed(
         move |_, _, _, _| match current_workspace_branch(&workspace_path) {
-            Ok(branch) => label.set_text(&workspace_meta_text(&branch, session_count)),
+            Ok(branch) => {
+                clear_workspace_pr_status(&monitor_state, &workspace_ref);
+                label.set_text(&workspace_meta_text(&branch, session_count));
+                schedule_render_sidebar_only(&monitor_state);
+            }
             Err(err) => eprintln!("failed to refresh branch for {workspace_path}: {err}"),
         },
     );
@@ -1179,10 +1382,21 @@ fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
     match create_workspace(repo_canonical, None) {
         Ok(workspace) => {
             let workspace_ref = workspace_ref(&workspace);
+            let selected_session = workspace.sessions.first().map(|session| session.id.clone());
+            let preferred_session = selected_session.clone();
+            let mut next_groups = current_groups(state);
+            if let Some(group) = next_groups
+                .iter_mut()
+                .find(|group| group.repo_canonical == workspace.repo_canonical)
+            {
+                group.workspaces.push(workspace);
+                group.workspace_count = group.workspaces.len();
+            }
+            *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
             *state.editing_workspace.borrow_mut() = Some(workspace_ref.clone());
-            *state.selected_session.borrow_mut() = None;
-            schedule_refresh(state, Some(workspace_ref), None);
+            *state.selected_session.borrow_mut() = selected_session;
+            schedule_render_current_ui(state, Some(workspace_ref), preferred_session);
         }
         Err(err) => {
             eprintln!("failed to create workspace: {err}");
@@ -1191,19 +1405,30 @@ fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
 }
 
 fn clone_and_edit_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
-    let placeholder = next_workspace_clone_name(workspace);
+    let placeholder = next_workspace_clone_name(state, workspace);
     let source_workspace_ref = workspace_ref(workspace);
     match clone_workspace(&source_workspace_ref, &placeholder) {
         Ok(workspace) => {
             let workspace_ref = workspace_ref(&workspace);
+            let selected_session = workspace.sessions.first().map(|session| session.id.clone());
+            let preferred_session = selected_session.clone();
+            let mut next_groups = current_groups(state);
+            if let Some(group) = next_groups
+                .iter_mut()
+                .find(|group| group.repo_canonical == workspace.repo_canonical)
+            {
+                group.workspaces.push(workspace);
+                group.workspace_count = group.workspaces.len();
+            }
+            *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
             *state.editing_workspace.borrow_mut() = Some(workspace_ref.clone());
-            *state.selected_session.borrow_mut() = None;
-            schedule_refresh(state, Some(workspace_ref), None);
+            *state.selected_session.borrow_mut() = selected_session;
+            schedule_render_current_ui(state, Some(workspace_ref), preferred_session);
         }
         Err(err) => {
             eprintln!("failed to clone workspace: {err}");
-            schedule_refresh(state, Some(source_workspace_ref), None);
+            schedule_render_current_ui(state, Some(source_workspace_ref), None);
         }
     }
 }
@@ -1287,14 +1512,22 @@ fn toggle_repo_collapsed_and_refresh(state: &Rc<AppState>, repo_canonical: &str,
 
     match result {
         Ok(()) => {
+            let mut next_groups = current_groups(state);
+            if let Some(group) = next_groups
+                .iter_mut()
+                .find(|group| group.repo_canonical == repo_canonical)
+            {
+                group.collapsed = !collapsed;
+            }
+            *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.editing_workspace.borrow_mut() = None;
             *state.selected_session.borrow_mut() = None;
-            schedule_refresh(state, None, None);
+            schedule_render_current_ui(state, None, None);
         }
         Err(err) => {
             eprintln!("failed to toggle repository collapse: {err}");
             let preferred_workspace = state.selected_workspace.borrow().clone();
-            schedule_refresh(state, preferred_workspace, None);
+            schedule_render_current_ui(state, preferred_workspace, None);
         }
     }
 }
@@ -1367,37 +1600,72 @@ fn commit_workspace_rename(state: &Rc<AppState>, current_workspace_ref: &str, ne
     *state.editing_workspace.borrow_mut() = None;
 
     if next_name.is_empty() {
-        schedule_refresh(state, Some(current_workspace_ref.to_string()), None);
+        schedule_render_current_ui(state, Some(current_workspace_ref.to_string()), None);
         return;
     }
 
     match rename_workspace(current_workspace_ref, next_name) {
         Ok(workspace) => {
             let next_workspace_ref = workspace_ref(&workspace);
+            clear_workspace_pr_status(state, current_workspace_ref);
+            let mut next_groups = current_groups(state);
+            for group in &mut next_groups {
+                if group.repo_canonical != workspace.repo_canonical {
+                    continue;
+                }
+                if let Some(candidate) = group
+                    .workspaces
+                    .iter_mut()
+                    .find(|candidate| workspace_ref(candidate) == current_workspace_ref)
+                {
+                    *candidate = workspace;
+                    break;
+                }
+            }
+            *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.selected_workspace.borrow_mut() = Some(next_workspace_ref.clone());
             *state.selected_session.borrow_mut() = None;
-            schedule_refresh(state, Some(next_workspace_ref), None);
+            schedule_render_current_ui(state, Some(next_workspace_ref), None);
         }
         Err(err) => {
             eprintln!("failed to rename workspace: {err}");
             *state.editing_workspace.borrow_mut() = Some(current_workspace_ref.to_string());
-            schedule_refresh(state, Some(current_workspace_ref.to_string()), None);
+            schedule_render_current_ui(state, Some(current_workspace_ref.to_string()), None);
         }
     }
 }
 
 fn remove_selected_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
-    let workspace_ref = workspace_ref(workspace);
-    match remove_workspace(&workspace_ref) {
+    let removed_workspace_ref = workspace_ref(workspace);
+    match remove_workspace(&removed_workspace_ref) {
         Ok(_) => {
-            *state.selected_workspace.borrow_mut() = None;
+            clear_workspace_pr_status(state, &removed_workspace_ref);
+            let mut next_groups = state.workspace_groups.borrow().clone();
+            for group in &mut next_groups {
+                group
+                    .workspaces
+                    .retain(|candidate| workspace_ref(candidate) != removed_workspace_ref);
+                group.workspace_count = group.workspaces.len();
+            }
+
+            let next_workspace = state
+                .selected_workspace
+                .borrow()
+                .clone()
+                .filter(|selected| selected != &removed_workspace_ref)
+                .or_else(|| {
+                    first_workspace(&next_groups).map(|workspace| workspace_ref(&workspace))
+                });
+
+            *state.workspace_groups.borrow_mut() = next_groups.clone();
+            *state.selected_workspace.borrow_mut() = next_workspace.clone();
             *state.editing_workspace.borrow_mut() = None;
             *state.selected_session.borrow_mut() = None;
-            schedule_refresh(state, None, None);
+            schedule_render_current_ui(state, next_workspace, None);
         }
         Err(err) => {
             eprintln!("failed to remove workspace: {err}");
-            schedule_refresh(state, Some(workspace_ref), None);
+            schedule_refresh(state, Some(removed_workspace_ref), None);
         }
     }
 }
@@ -1428,8 +1696,8 @@ fn submit_repository_form(state: &Rc<AppState>, repository_entry: &Entry, alias_
     }
 }
 
-fn next_workspace_placeholder() -> String {
-    let groups = load_workspace_groups().unwrap_or_default();
+fn next_workspace_placeholder(state: &Rc<AppState>) -> String {
+    let groups = current_groups(state);
     for index in 1.. {
         let candidate = format!("new-{index}");
         let exists = groups.iter().any(|group| {
@@ -1446,9 +1714,9 @@ fn next_workspace_placeholder() -> String {
     "new".to_string()
 }
 
-fn next_workspace_clone_name(workspace: &WorkspaceEntry) -> String {
+fn next_workspace_clone_name(state: &Rc<AppState>, workspace: &WorkspaceEntry) -> String {
     let _ = workspace;
-    next_workspace_placeholder()
+    next_workspace_placeholder(state)
 }
 #[derive(Clone)]
 struct DetailWidgets {
@@ -1681,16 +1949,24 @@ fn build_session_tab(
     tab
 }
 
-fn create_and_select_session(state: &Rc<AppState>, workspace_ref: &str) {
-    match create_session(workspace_ref) {
+fn create_and_select_session(state: &Rc<AppState>, workspace_id: &str) {
+    match create_session(workspace_id) {
         Ok(session) => {
-            *state.selected_workspace.borrow_mut() = Some(workspace_ref.to_string());
+            let mut next_groups = current_groups(state);
+            for group in &mut next_groups {
+                if let Some(workspace) = group
+                    .workspaces
+                    .iter_mut()
+                    .find(|workspace| workspace_ref(workspace) == workspace_id)
+                {
+                    workspace.sessions.push(session.clone());
+                    break;
+                }
+            }
+            *state.workspace_groups.borrow_mut() = next_groups.clone();
+            *state.selected_workspace.borrow_mut() = Some(workspace_id.to_string());
             *state.selected_session.borrow_mut() = Some(session.id.clone());
-            schedule_refresh(
-                state,
-                Some(workspace_ref.to_string()),
-                Some(session.id.clone()),
-            );
+            schedule_render_current_ui(state, Some(workspace_id.to_string()), Some(session.id));
         }
         Err(err) => {
             eprintln!("failed to create session: {err}");
@@ -1700,7 +1976,7 @@ fn create_and_select_session(state: &Rc<AppState>, workspace_ref: &str) {
 
 fn close_specific_session(
     state: &Rc<AppState>,
-    workspace_ref: &str,
+    workspace_id: &str,
     session_ids: &[String],
     session_id: &str,
 ) {
@@ -1711,13 +1987,24 @@ fn close_specific_session(
 
     match close_session(session_id) {
         Ok(_) => {
-            *state.selected_workspace.borrow_mut() = Some(workspace_ref.to_string());
+            let preferred_session = next_selected.clone();
+            let mut next_groups = current_groups(state);
+            for group in &mut next_groups {
+                if let Some(workspace) = group
+                    .workspaces
+                    .iter_mut()
+                    .find(|workspace| workspace_ref(workspace) == workspace_id)
+                {
+                    workspace
+                        .sessions
+                        .retain(|session| session.id != session_id);
+                    break;
+                }
+            }
+            *state.workspace_groups.borrow_mut() = next_groups.clone();
+            *state.selected_workspace.borrow_mut() = Some(workspace_id.to_string());
             *state.selected_session.borrow_mut() = next_selected;
-            schedule_refresh(
-                state,
-                Some(workspace_ref.to_string()),
-                state.selected_session.borrow().clone(),
-            );
+            schedule_render_current_ui(state, Some(workspace_id.to_string()), preferred_session);
         }
         Err(err) => {
             eprintln!("failed to close session: {err}");
