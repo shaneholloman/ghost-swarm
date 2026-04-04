@@ -209,6 +209,46 @@ pub fn rename_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntr
     })
 }
 
+pub fn clone_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntry, SwarmError> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let repo_store = RepositoryStore::open().await?;
+        let workspace_store = WorkspaceStore::open().await?;
+        let session_store = SessionStore::open().await?;
+        let workspace = workspace_store.clone(workspace_ref, name).await?;
+        let repo = repo_store
+            .resolve_repository(&workspace.repository)
+            .await?
+            .ok_or_else(|| SwarmError::RepositoryNotFound(workspace.repository.clone()))?;
+        let workspace_ref = format!("{}:{}", workspace.repository, workspace.name);
+        if let Err(err) = session_store
+            .create(&workspace_ref, &default_session_command())
+            .await
+        {
+            eprintln!("failed to create default session for {workspace_ref}: {err}");
+        }
+        let sessions = session_store
+            .list(Some(&workspace_ref))
+            .await?
+            .into_iter()
+            .map(|session| SessionEntry {
+                id: session.id,
+                status: session.status,
+                command: session.command.join(" "),
+                log_path: session.log_path.display().to_string(),
+                socket_path: session.socket_path.display().to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(map_workspace(
+            repo.alias.as_deref().unwrap_or(&repo.name),
+            &repo.canonical(),
+            workspace,
+            sessions,
+        ))
+    })
+}
+
 pub fn remove_workspace(workspace_ref: &str) -> Result<WorkspaceEntry, SwarmError> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {

@@ -115,6 +115,9 @@ fn install_draw_func(area: &DrawingArea, state: Rc<RefCell<SessionTerminalState>
 fn install_socket_pump(state: Rc<RefCell<SessionTerminalState>>) {
     glib::timeout_add_local(Duration::from_millis(33), move || {
         if let Ok(mut state) = state.try_borrow_mut() {
+            if state.area.parent().is_none() {
+                return glib::ControlFlow::Break;
+            }
             state.poll();
         }
         glib::ControlFlow::Continue

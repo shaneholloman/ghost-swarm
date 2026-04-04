@@ -17,10 +17,10 @@ use std::{
 
 use crate::{
     data::{
-        SessionEntry, WorkspaceEntry, WorkspaceGroup, add_repository, close_session,
-        collapse_repository, create_session, create_workspace, current_workspace_branch,
-        expand_repository, load_workspace_groups, remove_workspace, rename_workspace,
-        sync_repository, workspace_head_path,
+        SessionEntry, WorkspaceEntry, WorkspaceGroup, add_repository, clone_workspace,
+        close_session, collapse_repository, create_session, create_workspace,
+        current_workspace_branch, expand_repository, load_workspace_groups, remove_workspace,
+        rename_workspace, sync_repository, workspace_head_path,
     },
     ghostty,
 };
@@ -214,23 +214,38 @@ window {
   padding: 9px 10px 9px 10px;
 }
 
-.workspace-delete-slot {
-  min-width: 28px;
+.workspace-action-slot {
+  min-width: 16px;
 }
 
-.workspace-delete {
-  min-width: 24px;
-  min-height: 24px;
+.workspace-action-slot-end {
+  min-width: 42px;
+}
+
+.workspace-action {
+  min-width: 18px;
+  min-height: 18px;
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;
   color: #7a8698;
+}
+
+.workspace-delete {
 }
 
 .workspace-delete:hover {
   background: rgba(255, 133, 133, 0.16);
   color: #ffd9d9;
+}
+
+.workspace-clone {
+}
+
+.workspace-clone:hover {
+  background: rgba(126, 203, 255, 0.08);
+  color: #e7f3ff;
 }
 
 .workspace-name {
@@ -642,6 +657,8 @@ fn build_sidebar(
                 let rows = rows_for_signal.borrow();
                 for candidate in rows.iter() {
                     let is_selected = candidate.row == selected_row;
+                    candidate.clone_button.set_visible(is_selected);
+                    candidate.clone_button.set_sensitive(is_selected);
                     candidate.delete_button.set_visible(is_selected);
                     candidate.delete_button.set_sensitive(is_selected);
                 }
@@ -663,6 +680,10 @@ fn build_sidebar(
                 } else {
                     None
                 };
+
+                if preserve_session {
+                    return;
+                }
 
                 *state.selected_workspace.borrow_mut() = Some(next_workspace_ref);
                 *state.selected_session.borrow_mut() = preferred_session.clone();
@@ -954,16 +975,43 @@ fn build_workspace_row(
 
     let delete_slot = GtkBox::new(Orientation::Horizontal, 0);
     delete_slot.set_valign(Align::Center);
-    delete_slot.add_css_class("workspace-delete-slot");
+    delete_slot.add_css_class("workspace-action-slot");
+
+    let clone_slot = GtkBox::new(Orientation::Horizontal, 0);
+    clone_slot.set_valign(Align::Center);
+    clone_slot.set_halign(Align::End);
+    clone_slot.add_css_class("workspace-action-slot-end");
+
+    let clone_button = Button::new();
+    clone_button.set_valign(Align::Center);
+    clone_button.set_tooltip_text(Some("Clone workspace"));
+    clone_button.add_css_class("workspace-action");
+    clone_button.add_css_class("workspace-clone");
+    clone_button.set_visible(is_selected);
+    clone_button.set_sensitive(is_selected);
+
+    let clone_icon = Image::from_icon_name("edit-copy-symbolic");
+    clone_icon.set_pixel_size(12);
+    clone_button.set_child(Some(&clone_icon));
+
+    {
+        let state = state.clone();
+        let workspace = workspace.clone();
+        clone_button.connect_clicked(move |_| {
+            clone_and_edit_workspace(&state, &workspace);
+        });
+    }
 
     let delete_button = Button::new();
     delete_button.set_valign(Align::Center);
     delete_button.set_tooltip_text(Some("Remove workspace"));
+    delete_button.add_css_class("workspace-action");
     delete_button.add_css_class("workspace-delete");
     delete_button.set_visible(is_selected);
     delete_button.set_sensitive(is_selected);
 
     let icon = Image::from_icon_name("user-trash-symbolic");
+    icon.set_pixel_size(12);
     delete_button.set_child(Some(&icon));
 
     {
@@ -975,6 +1023,7 @@ fn build_workspace_row(
     }
 
     delete_slot.append(&delete_button);
+    clone_slot.append(&clone_button);
 
     let card = GtkBox::new(Orientation::Vertical, 4);
     card.set_hexpand(true);
@@ -1010,11 +1059,13 @@ fn build_workspace_row(
 
     container.append(&delete_slot);
     container.append(&card);
+    container.append(&clone_slot);
     row.set_child(Some(&container));
 
     WorkspaceRow {
         row,
         workspace: workspace.clone(),
+        clone_button,
         delete_button,
     }
 }
@@ -1079,6 +1130,24 @@ fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
         }
         Err(err) => {
             eprintln!("failed to create workspace: {err}");
+        }
+    }
+}
+
+fn clone_and_edit_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
+    let placeholder = next_workspace_clone_name(workspace);
+    let source_workspace_ref = workspace_ref(workspace);
+    match clone_workspace(&source_workspace_ref, &placeholder) {
+        Ok(workspace) => {
+            let workspace_ref = workspace_ref(&workspace);
+            *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
+            *state.editing_workspace.borrow_mut() = Some(workspace_ref.clone());
+            *state.selected_session.borrow_mut() = None;
+            schedule_refresh(state, Some(workspace_ref), None);
+        }
+        Err(err) => {
+            eprintln!("failed to clone workspace: {err}");
+            schedule_refresh(state, Some(source_workspace_ref), None);
         }
     }
 }
@@ -1321,6 +1390,11 @@ fn next_workspace_placeholder() -> String {
     "new".to_string()
 }
 
+fn next_workspace_clone_name(workspace: &WorkspaceEntry) -> String {
+    let _ = workspace;
+    next_workspace_placeholder()
+}
+
 #[derive(Clone)]
 struct DetailWidgets {
     container: GtkBox,
@@ -1332,6 +1406,7 @@ struct DetailWidgets {
 struct WorkspaceRow {
     row: ListBoxRow,
     workspace: WorkspaceEntry,
+    clone_button: Button,
     delete_button: Button,
 }
 
