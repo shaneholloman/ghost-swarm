@@ -1837,10 +1837,8 @@ impl DetailWidgets {
                 pid: None,
                 program: "No sessions".to_string(),
                 status: "idle".to_string(),
-                command: "Create or attach a session to mount Ghostty here.".to_string(),
                 log_path: String::new(),
                 socket_path: String::new(),
-                pid: None,
             });
             self.session_stack
                 .add_titled(&empty, Some("empty"), "empty");

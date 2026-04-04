@@ -23,7 +23,6 @@ pub struct WorkspaceGroup {
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceEntry {
-    pub repo_label: String,
     pub repo_canonical: String,
     pub name: String,
     pub branch: String,
@@ -37,10 +36,8 @@ pub struct SessionEntry {
     pub pid: Option<u32>,
     pub program: String,
     pub status: String,
-    pub command: String,
     pub log_path: String,
     pub socket_path: String,
-    pub pid: Option<u32>,
 }
 
 pub fn load_workspace_groups() -> Result<Vec<WorkspaceGroup>, SwarmError> {
@@ -68,15 +65,12 @@ pub fn load_workspace_groups() -> Result<Vec<WorkspaceGroup>, SwarmError> {
                         program: session_program(session.pid, &session.command),
                         id: session.id,
                         status: session.status,
-                        command: session.command.join(" "),
                         log_path: session.log_path.display().to_string(),
                         socket_path: session.socket_path.display().to_string(),
-                        pid: session.pid,
                     })
                     .collect::<Vec<_>>();
 
                 Ok::<WorkspaceEntry, SwarmError>(map_workspace(
-                    &repo_label,
                     &repo_canonical,
                     workspace,
                     sessions,
@@ -133,15 +127,12 @@ pub fn create_workspace(
                 program: session_program(session.pid, &session.command),
                 id: session.id,
                 status: session.status,
-                command: session.command.join(" "),
                 log_path: session.log_path.display().to_string(),
                 socket_path: session.socket_path.display().to_string(),
-                pid: session.pid,
             })
             .collect::<Vec<_>>();
 
         Ok(map_workspace(
-            repo.alias.as_deref().unwrap_or(&repo.name),
             &repo.canonical(),
             workspace,
             sessions,
@@ -205,15 +196,12 @@ pub fn rename_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntr
                 program: session_program(session.pid, &session.command),
                 id: session.id,
                 status: session.status,
-                command: session.command.join(" "),
                 log_path: session.log_path.display().to_string(),
                 socket_path: session.socket_path.display().to_string(),
-                pid: session.pid,
             })
             .collect::<Vec<_>>();
 
         Ok(map_workspace(
-            repo.alias.as_deref().unwrap_or(&repo.name),
             &repo.canonical(),
             workspace,
             sessions,
@@ -248,15 +236,12 @@ pub fn clone_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntry
                 program: session_program(session.pid, &session.command),
                 id: session.id,
                 status: session.status,
-                command: session.command.join(" "),
                 log_path: session.log_path.display().to_string(),
                 socket_path: session.socket_path.display().to_string(),
-                pid: session.pid,
             })
             .collect::<Vec<_>>();
 
         Ok(map_workspace(
-            repo.alias.as_deref().unwrap_or(&repo.name),
             &repo.canonical(),
             workspace,
             sessions,
@@ -284,7 +269,6 @@ pub fn remove_workspace(workspace_ref: &str) -> Result<WorkspaceEntry, SwarmErro
             .ok_or_else(|| SwarmError::RepositoryNotFound(workspace.repository.clone()))?;
 
         Ok(map_workspace(
-            repo.alias.as_deref().unwrap_or(&repo.name),
             &repo.canonical(),
             workspace,
             Vec::new(),
@@ -305,10 +289,8 @@ pub fn create_session(workspace_ref: &str) -> Result<SessionEntry, SwarmError> {
             pid: session.pid,
             program: session_program(session.pid, &session.command),
             status: session.status,
-            command: session.command.join(" "),
             log_path: session.log_path.display().to_string(),
             socket_path: session.socket_path.display().to_string(),
-            pid: session.pid,
         })
     })
 }
@@ -325,10 +307,8 @@ pub fn close_session(session_id: &str) -> Result<SessionEntry, SwarmError> {
             pid: session.pid,
             program: session_program(session.pid, &session.command),
             status: session.status,
-            command: session.command.join(" "),
             log_path: session.log_path.display().to_string(),
             socket_path: session.socket_path.display().to_string(),
-            pid: session.pid,
         })
     })
 }
@@ -368,13 +348,11 @@ pub fn workspace_head_path(path: &str) -> Result<PathBuf, SwarmError> {
 }
 
 fn map_workspace(
-    repo_label: &str,
     repo_canonical: &str,
     workspace: Workspace,
     sessions: Vec<SessionEntry>,
 ) -> WorkspaceEntry {
     WorkspaceEntry {
-        repo_label: repo_label.to_string(),
         repo_canonical: repo_canonical.to_string(),
         name: workspace.name,
         branch: workspace.branch,
@@ -514,7 +492,7 @@ fn read_proc_stat(pid: u32) -> Result<ProcStat, io::Error> {
 }
 
 fn parse_proc_stat(contents: &str) -> Option<ProcStat> {
-    let open = contents.find('(')?;
+    contents.find('(')?;
     let close = contents.rfind(')')?;
     let rest = contents.get(close + 2..)?;
     let fields = rest.split_whitespace().collect::<Vec<_>>();
