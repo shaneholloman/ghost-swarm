@@ -940,6 +940,14 @@ fn spawn_pty_child(cwd: &Path, command: &[String]) -> Result<(Pty, u32), SwarmEr
             }
         }
 
+        if let Some(prompt) = workspace_prompt(cwd) {
+            if let (Ok(name), Ok(value)) = (CString::new("PS1"), CString::new(prompt)) {
+                unsafe {
+                    libc::setenv(name.as_ptr(), value.as_ptr(), 1);
+                }
+            }
+        }
+
         let mut cstrings = Vec::with_capacity(command.len());
         for arg in command {
             match CString::new(arg.as_str()) {
@@ -964,6 +972,11 @@ fn spawn_pty_child(cwd: &Path, command: &[String]) -> Result<(Pty, u32), SwarmEr
     }
 
     Ok((Pty { master_fd }, pid as u32))
+}
+
+fn workspace_prompt(cwd: &Path) -> Option<String> {
+    let workspace = cwd.file_name()?.to_str()?;
+    Some(format!("{workspace}> "))
 }
 
 fn new_session_id() -> String {
