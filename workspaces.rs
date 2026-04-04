@@ -372,6 +372,7 @@ impl WorkspaceStore {
             .map_err(|err| database_error(&repo_db_path, "connect", err))?;
 
         migrate_repo_db(&conn, &repo_db_path).await?;
+        self.reconcile_workspaces(&conn, repo).await?;
 
         Ok(conn)
     }
@@ -510,6 +511,76 @@ impl WorkspaceStore {
         }
 
         Ok(workspaces_dir.join(name).exists())
+    }
+
+    async fn reconcile_workspaces(
+        &self,
+        db: &Connection,
+        repo: &Repository,
+    ) -> Result<(), SwarmError> {
+        let workspaces_dir = self.repos.workspaces_dir(repo);
+        if !workspaces_dir.exists() {
+            return Ok(());
+        }
+
+        let registered_worktrees = self.repos.bare_repo_path(repo).join("worktrees");
+        let mut entries = fs::read_dir(&workspaces_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            let workspace_name = entry.file_name().to_string_lossy().to_string();
+            let workspace_path = entry.path();
+            let workspace_gitdir = workspace_path.join(".git");
+            let registered_path = registered_worktrees.join(&workspace_name);
+
+            if !workspace_gitdir.exists() || !registered_path.exists() {
+                continue;
+            }
+
+            let mut stmt = db
+                .prepare(
+                    "SELECT path
+                     FROM workspaces
+                     WHERE name = ?1
+                     LIMIT 1",
+                )
+                .await?;
+            let mut rows = stmt.query([workspace_name.as_str()]).await?;
+
+            if let Some(row) = rows.next().await? {
+                let recorded_path = PathBuf::from(row.get::<String>(0)?);
+                if recorded_path != workspace_path {
+                    db.execute(
+                        "UPDATE workspaces
+                         SET path = ?2
+                         WHERE name = ?1",
+                        (workspace_name.as_str(), path_to_string(&workspace_path)?),
+                    )
+                    .await?;
+                }
+                continue;
+            }
+
+            let branch = git_current_branch(&workspace_path)?;
+            let created_at = workspace_created_at(&workspace_path);
+
+            db.execute(
+                "INSERT INTO workspaces (name, branch, path, created_at, archived_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL)",
+                (
+                    workspace_name.as_str(),
+                    branch.as_str(),
+                    path_to_string(&workspace_path)?,
+                    created_at,
+                ),
+            )
+            .await?;
+        }
+
+        Ok(())
     }
 
     fn ensure_bare_repo(&self, repo: &Repository) -> Result<String, SwarmError> {
@@ -706,6 +777,15 @@ fn unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn workspace_created_at(path: &Path) -> i64 {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.created().or_else(|_| metadata.modified()))
+        .ok()
+        .and_then(|timestamp| timestamp.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_else(unix_timestamp)
 }
 
 pub async fn migrate_repo_db(conn: &Connection, path: &Path) -> Result<(), SwarmError> {
@@ -1109,6 +1189,57 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn list_reconciles_missing_workspace_rows_from_live_worktrees() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let data_home = unique_temp_path("swarm-test-data-home");
+        fs::create_dir_all(&data_home).unwrap();
+        let _env_guard = ScopedEnvVar::set("XDG_DATA_HOME", &data_home);
+
+        let repos = RepositoryStore::open().await.unwrap();
+        let repo = repos.add("github/penberg/swarm", None).await.unwrap();
+        let bare_repo_path = repos.bare_repo_path(&repo);
+        fs::rename(create_bare_repo("main"), &bare_repo_path).unwrap();
+
+        let workspaces_dir = repos.workspaces_dir(&repo);
+        fs::create_dir_all(&workspaces_dir).unwrap();
+        let workspace_path = workspaces_dir.join("restored");
+        run_git(
+            Some(&workspaces_dir),
+            build_worktree_add_args(&bare_repo_path, &workspace_path, "restored", "main").unwrap(),
+        )
+        .unwrap();
+
+        let store = WorkspaceStore::open().await.unwrap();
+        let workspaces = store.list("swarm").await.unwrap();
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].repository, "github/penberg/swarm");
+        assert_eq!(workspaces[0].name, "restored");
+        assert_eq!(workspaces[0].branch, "restored");
+        assert_eq!(workspaces[0].path, workspace_path);
+        assert!(workspaces[0].created_at > 0);
+
+        let db = store.open_repo_db(&repo).await.unwrap();
+        let mut stmt = db
+            .prepare(
+                "SELECT name, branch, path, archived_at
+                 FROM workspaces
+                 WHERE name = 'restored'",
+            )
+            .await
+            .unwrap();
+        let mut rows = stmt.query(()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "restored");
+        assert_eq!(row.get::<String>(1).unwrap(), "restored");
+        assert_eq!(
+            row.get::<String>(2).unwrap(),
+            workspace_path.to_str().unwrap()
+        );
+        assert_eq!(row.get::<Option<i64>>(3).unwrap(), None);
     }
 
     fn create_bare_repo(default_branch: &str) -> PathBuf {
