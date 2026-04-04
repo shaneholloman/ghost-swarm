@@ -717,6 +717,21 @@ fn clear_workspace_pr_status(state: &Rc<AppState>, workspace_ref: &str) {
     state.pending_pr_lookups.borrow_mut().remove(workspace_ref);
 }
 
+fn update_cached_workspace_branch(state: &Rc<AppState>, workspace_id: &str, branch: &str) {
+    let mut next_groups = current_groups(state);
+    for group in &mut next_groups {
+        if let Some(workspace) = group
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace_ref(workspace) == workspace_id)
+        {
+            workspace.branch = branch.to_string();
+            break;
+        }
+    }
+    *state.workspace_groups.borrow_mut() = next_groups;
+}
+
 fn install_session_cycle_shortcuts(window: &ApplicationWindow, state: &Rc<AppState>) {
     let controller = EventControllerKey::new();
     controller.set_propagation_phase(PropagationPhase::Capture);
@@ -1350,12 +1365,12 @@ fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, bran
     let monitor_state = state.clone();
     let workspace_ref = workspace_ref(workspace);
     let workspace_path = workspace.path.clone();
-    let session_count = workspace.sessions.len();
     monitor.connect_changed(
         move |_, _, _, _| match current_workspace_branch(&workspace_path) {
             Ok(branch) => {
                 clear_workspace_pr_status(&monitor_state, &workspace_ref);
-                label.set_text(&workspace_meta_text(&branch, session_count));
+                update_cached_workspace_branch(&monitor_state, &workspace_ref, &branch);
+                label.set_text(&branch);
                 schedule_render_sidebar_only(&monitor_state);
             }
             Err(err) => eprintln!("failed to refresh branch for {workspace_path}: {err}"),
