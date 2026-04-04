@@ -17,8 +17,8 @@ use std::{
 
 use crate::{
     data::{
-        SessionEntry, WorkspaceEntry, WorkspaceGroup, add_repository, clone_workspace,
-        close_session, collapse_repository, create_session, create_workspace,
+        SessionEntry, WorkspaceEntry, WorkspaceGroup, WorkspacePullRequestState, add_repository,
+        clone_workspace, close_session, collapse_repository, create_session, create_workspace,
         current_workspace_branch, expand_repository, load_workspace_groups, remove_workspace,
         rename_workspace, sync_repository, workspace_head_path,
     },
@@ -211,15 +211,42 @@ window {
 }
 
 .workspace-card {
-  padding: 9px 10px 9px 10px;
+  padding: 9px 10px 9px 0;
 }
 
 .workspace-action-slot {
-  min-width: 16px;
+  min-width: 20px;
 }
 
 .workspace-action-slot-end {
-  min-width: 42px;
+  min-width: 20px;
+}
+
+.workspace-status-slot {
+  min-width: 20px;
+}
+
+.workspace-pr-indicator {
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: 999px;
+  background: #6f7887;
+}
+
+.workspace-pr-success {
+  background: #57c26c;
+}
+
+.workspace-pr-pending {
+  background: #d8a341;
+}
+
+.workspace-pr-failure {
+  background: #e06767;
+}
+
+.workspace-pr-merged {
+  background: #a371f7;
 }
 
 .workspace-action {
@@ -972,14 +999,21 @@ fn build_workspace_row(
 
     let container = GtkBox::new(Orientation::Horizontal, 0);
     container.set_hexpand(true);
+    container.set_spacing(8);
 
     let delete_slot = GtkBox::new(Orientation::Horizontal, 0);
     delete_slot.set_valign(Align::Center);
+    delete_slot.set_halign(Align::Center);
     delete_slot.add_css_class("workspace-action-slot");
+
+    let status_slot = GtkBox::new(Orientation::Horizontal, 0);
+    status_slot.set_valign(Align::Center);
+    status_slot.set_halign(Align::Center);
+    status_slot.add_css_class("workspace-status-slot");
 
     let clone_slot = GtkBox::new(Orientation::Horizontal, 0);
     clone_slot.set_valign(Align::Center);
-    clone_slot.set_halign(Align::End);
+    clone_slot.set_halign(Align::Center);
     clone_slot.add_css_class("workspace-action-slot-end");
 
     let clone_button = Button::new();
@@ -1058,6 +1092,8 @@ fn build_workspace_row(
     install_branch_monitor(state, workspace, &branch);
 
     container.append(&delete_slot);
+    status_slot.append(&build_workspace_pr_indicator(workspace));
+    container.append(&status_slot);
     container.append(&card);
     container.append(&clone_slot);
     row.set_child(Some(&container));
@@ -1068,6 +1104,27 @@ fn build_workspace_row(
         clone_button,
         delete_button,
     }
+}
+
+fn build_workspace_pr_indicator(workspace: &WorkspaceEntry) -> Widget {
+    let indicator = GtkBox::new(Orientation::Horizontal, 0);
+    indicator.add_css_class("workspace-pr-indicator");
+    if let Some(pull_request) = workspace.pull_request.as_ref() {
+        indicator.add_css_class(match pull_request.state {
+            WorkspacePullRequestState::Success => "workspace-pr-success",
+            WorkspacePullRequestState::Pending => "workspace-pr-pending",
+            WorkspacePullRequestState::Failure => "workspace-pr-failure",
+            WorkspacePullRequestState::Merged => "workspace-pr-merged",
+        });
+        indicator.set_tooltip_text(Some(&pull_request.summary));
+        if let Some(url) = &pull_request.url {
+            indicator.set_tooltip_text(Some(&format!("{}\n{}", pull_request.summary, url)));
+        }
+    } else {
+        indicator.set_tooltip_text(Some("No pull request"));
+    }
+
+    indicator.upcast()
 }
 
 fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, branch: &Label) {
