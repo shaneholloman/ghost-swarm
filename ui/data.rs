@@ -132,11 +132,7 @@ pub fn create_workspace(
             })
             .collect::<Vec<_>>();
 
-        Ok(map_workspace(
-            &repo.canonical(),
-            workspace,
-            sessions,
-        ))
+        Ok(map_workspace(&repo.canonical(), workspace, sessions))
     })
 }
 
@@ -201,11 +197,7 @@ pub fn rename_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntr
             })
             .collect::<Vec<_>>();
 
-        Ok(map_workspace(
-            &repo.canonical(),
-            workspace,
-            sessions,
-        ))
+        Ok(map_workspace(&repo.canonical(), workspace, sessions))
     })
 }
 
@@ -241,11 +233,7 @@ pub fn clone_workspace(workspace_ref: &str, name: &str) -> Result<WorkspaceEntry
             })
             .collect::<Vec<_>>();
 
-        Ok(map_workspace(
-            &repo.canonical(),
-            workspace,
-            sessions,
-        ))
+        Ok(map_workspace(&repo.canonical(), workspace, sessions))
     })
 }
 
@@ -268,11 +256,7 @@ pub fn remove_workspace(workspace_ref: &str) -> Result<WorkspaceEntry, SwarmErro
             .await?
             .ok_or_else(|| SwarmError::RepositoryNotFound(workspace.repository.clone()))?;
 
-        Ok(map_workspace(
-            &repo.canonical(),
-            workspace,
-            Vec::new(),
-        ))
+        Ok(map_workspace(&repo.canonical(), workspace, Vec::new()))
     })
 }
 
