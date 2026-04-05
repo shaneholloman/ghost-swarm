@@ -2,7 +2,9 @@
 
 A workspace manager for parallel development. Register git repositories, spin up isolated worktrees, and run persistent terminal sessions inside them — from the CLI or a native GTK desktop app.
 
-![Swarm](.github/assets/hero.png)
+<p align="center">
+  <img src=".github/assets/hero.png" width="600" alt="Swarm">
+</p>
 
 ## Motivation
 
