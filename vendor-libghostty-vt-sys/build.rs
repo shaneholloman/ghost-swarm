@@ -7,6 +7,7 @@ use std::{
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
 const GHOSTTY_COMMIT: &str = "bebca84668947bfc92b9a30ed58712e1c34eee1d";
+const ZIG_VERSION: &str = "0.15.2";
 
 fn main() {
     // docs.rs has no Zig toolchain. The checked-in bindings in src/bindings.rs
@@ -25,6 +26,8 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
     let target = env::var("TARGET").expect("TARGET must be set");
     let host = env::var("HOST").expect("HOST must be set");
+
+    ensure_zig_version();
 
     // Locate ghostty source: env override > fetch into OUT_DIR.
     let ghostty_dir = match env::var("GHOSTTY_SOURCE_DIR") {
@@ -109,7 +112,10 @@ fn emit_static_dep(search_roots: &[PathBuf], archive_name: &str, lib_name: &str)
         }
     }
 
-    panic!("failed to locate {archive_name} in {}", format_search_roots(search_roots));
+    panic!(
+        "failed to locate {archive_name} in {}",
+        format_search_roots(search_roots)
+    );
 }
 
 fn find_file(root: &Path, needle: &str) -> Option<PathBuf> {
@@ -153,9 +159,10 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
     // Skip fetch if we already have the right commit.
     if stamp.exists()
         && let Ok(existing) = std::fs::read_to_string(&stamp)
-            && existing.trim() == GHOSTTY_COMMIT {
-                return src_dir;
-            }
+        && existing.trim() == GHOSTTY_COMMIT
+    {
+        return src_dir;
+    }
 
     // Clean and clone fresh.
     if src_dir.exists() {
@@ -191,6 +198,31 @@ fn run(mut command: Command, context: &str) {
         .status()
         .unwrap_or_else(|error| panic!("failed to execute {context}: {error}"));
     assert!(status.success(), "{context} failed with status {status}");
+}
+
+fn ensure_zig_version() {
+    let output = Command::new("zig")
+        .arg("version")
+        .output()
+        .unwrap_or_else(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                panic!("failed to execute zig version: zig {ZIG_VERSION} is required but was not found in PATH");
+            }
+            _ => panic!("failed to execute zig version: {error}"),
+        });
+    assert!(
+        output.status.success(),
+        "zig version failed with status {}",
+        output.status
+    );
+
+    let version = String::from_utf8(output.stdout)
+        .unwrap_or_else(|error| panic!("zig version output was not valid UTF-8: {error}"));
+    let version = version.trim();
+    assert!(
+        version == ZIG_VERSION,
+        "zig {ZIG_VERSION} is required, found zig {version}"
+    );
 }
 
 fn zig_target(target: &str) -> String {

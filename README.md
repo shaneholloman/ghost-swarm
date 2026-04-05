@@ -16,11 +16,23 @@ For example, a typical **workspace-per-feature** workflow looks like this: creat
 
 ## Building
 
+The GTK desktop app depends on GTK 4 development headers and a Zig toolchain for the vendored `libghostty-vt` build. Swarm currently requires `zig 0.15.2`.
+
+On Ubuntu/Debian, install the same system packages used by the release build:
+
+```sh
+sudo apt install gcc g++ libcairo2-dev libglib2.0-dev libgtk-4-dev libpango1.0-dev pkg-config
+```
+
+Then install Zig 0.15.2 and make sure `zig` is on your `PATH`.
+
+Build the full application:
+
 ```sh
 cargo build
 ```
 
-Without the GTK UI:
+Without the GTK UI and its native prerequisites:
 
 ```sh
 cargo build --no-default-features
