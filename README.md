@@ -7,6 +7,20 @@
 
 A workspace manager for parallel development. Register git repositories, spin up isolated worktrees, and run persistent terminal sessions inside them — from the CLI or a native GTK desktop app.
 
+## Installation
+
+Install the latest prebuilt release on supported platforms with:
+
+```console
+> curl --proto '=https' --tlsv1.2 -LsSf https://github.com/penberg/swarm/releases/latest/download/swarm-installer.sh | sh
+```
+
+Then start the GUI with:
+
+```console
+> swarm
+```
+
 ## Motivation
 
 Coding agents are most effective when you can run many of them in parallel — one per feature, one per bug fix. But in practice, this quickly turns into chaos. Each agent needs its own copy of the source code so they don't step on each other's changes, and each one runs in its own terminal. Before long, you're drowning in terminal tabs, losing track of which agent is working on what, and manually juggling git branches and directories.
@@ -19,7 +33,7 @@ Swarm organizes work into **repositories**, **workspaces**, and **sessions**. A 
 
 For example, a typical **workspace-per-feature** workflow looks like this: create a workspace for every feature or bug fix, let a coding agent work on it in a session, submit a pull request, address review comments and iterate — all within the same workspace. When the work is merged to mainline, remove the workspace.
 
-## Building
+## Building from source
 
 The GTK desktop app depends on GTK 4 development headers and a Zig toolchain for the vendored `libghostty-vt` build. Swarm currently requires `zig 0.15.2`.
 
@@ -31,16 +45,10 @@ sudo apt install gcc g++ libcairo2-dev libglib2.0-dev libgtk-4-dev libpango1.0-d
 
 Then install Zig 0.15.2 and make sure `zig` is on your `PATH`.
 
-Build the full application:
+Install the program with:
 
 ```sh
-cargo build
-```
-
-Without the GTK UI and its native prerequisites:
-
-```sh
-cargo build --no-default-features
+cargo install --path .
 ```
 
 ## Documentation
