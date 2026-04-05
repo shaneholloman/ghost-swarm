@@ -16,26 +16,19 @@ pub struct Repository {
     pub owner: String,
     pub name: String,
     pub alias: Option<String>,
+    pub remote_url: Option<String>,
     pub collapsed: bool,
 }
 
 impl Repository {
     pub fn parse(input: &str, alias: Option<&str>) -> Result<Self, SwarmError> {
-        let mut parts = input.split('/');
-        let host = parts.next().unwrap_or_default().trim();
-        let owner = parts.next().unwrap_or_default().trim();
-        let name = parts.next().unwrap_or_default().trim();
-
-        if host.is_empty()
-            || owner.is_empty()
-            || name.is_empty()
-            || parts.next().is_some()
-            || [host, owner, name]
-                .iter()
-                .any(|part| part.contains(char::is_whitespace))
-        {
-            return Err(SwarmError::InvalidRepository(input.to_string()));
-        }
+        let input = input.trim();
+        let (host, owner, name, remote_url) = parse_remote_reference(input)
+            .or_else(|| {
+                parse_canonical_reference(input)
+                    .map(|(host, owner, name)| (host, owner, name, None))
+            })
+            .ok_or_else(|| SwarmError::InvalidRepository(input.to_string()))?;
 
         let default_alias = alias
             .map(str::trim)
@@ -44,10 +37,11 @@ impl Repository {
             .unwrap_or_else(|| name.to_string());
 
         Ok(Self {
-            host: host.to_string(),
-            owner: owner.to_string(),
-            name: name.to_string(),
+            host,
+            owner,
+            name: name.clone(),
             alias: Some(default_alias),
+            remote_url,
             collapsed: false,
         })
     }
@@ -57,12 +51,14 @@ impl Repository {
     }
 
     pub fn remote_url(&self) -> String {
-        format!(
-            "https://{}/{}/{}.git",
-            resolve_remote_host(&self.host),
-            self.owner,
-            self.name
-        )
+        self.remote_url.clone().unwrap_or_else(|| {
+            format!(
+                "https://{}/{}/{}.git",
+                resolve_remote_host(&self.host),
+                self.owner,
+                self.name
+            )
+        })
     }
 }
 
@@ -131,6 +127,7 @@ impl RepositoryStore {
                 owner TEXT NOT NULL,
                 name TEXT NOT NULL,
                 alias TEXT,
+                remote_url TEXT,
                 collapsed INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY (host, owner, name)
@@ -144,6 +141,7 @@ impl RepositoryStore {
         .await
         .map_err(|err| database_error(&index_db_path, "initialize schema", err))?;
         ensure_collapsed_column(&conn, &index_db_path).await?;
+        ensure_remote_url_column(&conn, &index_db_path).await?;
 
         Ok(Self { paths, conn })
     }
@@ -193,12 +191,13 @@ impl RepositoryStore {
 
         self.conn
             .execute(
-                "INSERT INTO repos (host, owner, name, alias, collapsed, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO repos (host, owner, name, alias, remote_url, collapsed, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 (
                     repo.host.as_str(),
                     repo.owner.as_str(),
                     repo.name.as_str(),
                     repo.alias.as_deref(),
+                    repo.remote_url.as_deref(),
                     repo.collapsed,
                     unix_timestamp(),
                 ),
@@ -213,6 +212,7 @@ impl RepositoryStore {
             .conn
             .prepare(
                 "SELECT host, owner, name, alias, collapsed
+                 , remote_url
                  FROM repos
                  ORDER BY host, owner, name",
             )
@@ -227,6 +227,7 @@ impl RepositoryStore {
                 name: row.get::<String>(2)?,
                 alias: row.get::<Option<String>>(3)?,
                 collapsed: row.get::<i64>(4)? != 0,
+                remote_url: row.get::<Option<String>>(5)?,
             });
         }
 
@@ -273,18 +274,18 @@ impl RepositoryStore {
                     remote_url.clone(),
                 ],
             )?;
+        } else if !git_has_remote(&bare_repo_path, "origin")? {
+            run_git(
+                Some(&repo_dir),
+                [
+                    format!("--git-dir={}", bare_repo_path.display()),
+                    "remote".to_string(),
+                    "add".to_string(),
+                    "origin".to_string(),
+                    remote_url,
+                ],
+            )?;
         }
-
-        run_git(
-            Some(&repo_dir),
-            [
-                format!("--git-dir={}", bare_repo_path.display()),
-                "remote".to_string(),
-                "set-url".to_string(),
-                "origin".to_string(),
-                remote_url,
-            ],
-        )?;
         run_git(
             Some(&repo_dir),
             [
@@ -370,6 +371,7 @@ impl RepositoryStore {
             .conn
             .prepare(
                 "SELECT host, owner, name, alias, collapsed
+                 , remote_url
                  FROM repos
                  WHERE host = ?1 AND owner = ?2 AND name = ?3",
             )
@@ -385,6 +387,7 @@ impl RepositoryStore {
                 name: row.get::<String>(2)?,
                 alias: row.get::<Option<String>>(3)?,
                 collapsed: row.get::<i64>(4)? != 0,
+                remote_url: row.get::<Option<String>>(5)?,
             }));
         }
 
@@ -413,6 +416,7 @@ impl RepositoryStore {
                     owner: repo.owner,
                     name: repo.name,
                     alias: None,
+                    remote_url: None,
                     collapsed: false,
                 })
                 .await;
@@ -426,6 +430,7 @@ impl RepositoryStore {
             .conn
             .prepare(
                 "SELECT host, owner, name, alias, collapsed
+                 , remote_url
                  FROM repos
                  WHERE alias = ?1
                  LIMIT 1",
@@ -440,6 +445,7 @@ impl RepositoryStore {
                 name: row.get::<String>(2)?,
                 alias: row.get::<Option<String>>(3)?,
                 collapsed: row.get::<i64>(4)? != 0,
+                remote_url: row.get::<Option<String>>(5)?,
             }));
         }
 
@@ -489,6 +495,18 @@ async fn ensure_collapsed_column(conn: &Connection, path: &Path) -> Result<(), S
     Ok(())
 }
 
+async fn ensure_remote_url_column(conn: &Connection, path: &Path) -> Result<(), SwarmError> {
+    if has_column(conn, "repos", "remote_url").await? {
+        return Ok(());
+    }
+
+    conn.execute("ALTER TABLE repos ADD COLUMN remote_url TEXT", ())
+        .await
+        .map_err(|err| database_error(path, "add remote_url column", err))?;
+
+    Ok(())
+}
+
 async fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, SwarmError> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).await?;
     let mut rows = stmt.query(()).await?;
@@ -517,6 +535,15 @@ fn git_is_bare_repository(path: &Path) -> Result<bool, SwarmError> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+fn git_has_remote(path: &Path, remote: &str) -> Result<bool, SwarmError> {
+    let output = Command::new("git")
+        .arg(format!("--git-dir={}", path.display()))
+        .args(["remote", "get-url", remote])
+        .output()?;
+
+    Ok(output.status.success())
 }
 
 fn run_git<I, S>(cwd: Option<&Path>, args: I) -> Result<String, SwarmError>
@@ -575,6 +602,11 @@ fn render_meta_toml(repo: &Repository) -> String {
         None => {}
     }
 
+    match &repo.remote_url {
+        Some(remote_url) => out.push_str(&format!("remote_url = {:?}\n", remote_url)),
+        None => {}
+    }
+
     out
 }
 
@@ -585,5 +617,141 @@ fn resolve_remote_host(host: &str) -> &str {
         "codeberg" => "codeberg.org",
         "bitbucket" => "bitbucket.org",
         _ => host,
+    }
+}
+
+fn parse_canonical_reference(input: &str) -> Option<(String, String, String)> {
+    let mut parts = input.split('/');
+    let host = parts.next()?.trim();
+    let owner = parts.next()?.trim();
+    let name = parts.next()?.trim();
+
+    if host.is_empty()
+        || owner.is_empty()
+        || name.is_empty()
+        || parts.next().is_some()
+        || [host, owner, name]
+            .iter()
+            .any(|part| part.contains(char::is_whitespace))
+    {
+        return None;
+    }
+
+    Some((host.to_string(), owner.to_string(), name.to_string()))
+}
+
+fn parse_remote_reference(input: &str) -> Option<(String, String, String, Option<String>)> {
+    let input = input.trim();
+
+    if let Some((_, remainder)) = input.split_once("://") {
+        let (authority, path) = split_remote_authority_and_path(remainder)?;
+        let host = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        let (owner, name) = parse_owner_and_name(path)?;
+        return Some((host.to_string(), owner, name, Some(input.to_string())));
+    }
+
+    let colon_index = input.find(':')?;
+    let slash_index = input.find('/')?;
+    if colon_index > slash_index {
+        return None;
+    }
+
+    let (authority, path) = input.split_at(colon_index);
+    let path = path.strip_prefix(':')?;
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let (owner, name) = parse_owner_and_name(path)?;
+
+    Some((host.to_string(), owner, name, Some(input.to_string())))
+}
+
+fn split_remote_authority_and_path(input: &str) -> Option<(&str, &str)> {
+    let (authority, path) = input.split_once('/')?;
+    if authority.is_empty() || path.is_empty() {
+        return None;
+    }
+
+    Some((authority, path))
+}
+
+fn parse_owner_and_name(path: &str) -> Option<(String, String)> {
+    let path = path.trim_matches('/');
+    let (owner, name) = path.split_once('/')?;
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        return None;
+    }
+
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    if [owner, name]
+        .iter()
+        .any(|part| part.is_empty() || part.contains(char::is_whitespace))
+    {
+        return None;
+    }
+
+    Some((owner.to_string(), name.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Repository;
+
+    #[test]
+    fn shorthand_repo_defaults_to_https_remote() {
+        let repo = Repository {
+            host: "github".to_string(),
+            owner: "penberg".to_string(),
+            name: "swarm".to_string(),
+            alias: None,
+            remote_url: None,
+            collapsed: false,
+        };
+
+        assert_eq!(repo.remote_url(), "https://github.com/penberg/swarm.git");
+    }
+
+    #[test]
+    fn parses_https_remote_url() {
+        let repo = Repository::parse("https://github.com/penberg/swarm.git", None).unwrap();
+
+        assert_eq!(
+            (repo.host.as_str(), repo.owner.as_str(), repo.name.as_str()),
+            ("github.com", "penberg", "swarm")
+        );
+        assert_eq!(
+            repo.remote_url.as_deref(),
+            Some("https://github.com/penberg/swarm.git")
+        );
+    }
+
+    #[test]
+    fn parses_ssh_remote_url() {
+        let repo = Repository::parse("git@github.com:penberg/swarm.git", None).unwrap();
+
+        assert_eq!(
+            (repo.host.as_str(), repo.owner.as_str(), repo.name.as_str()),
+            ("github.com", "penberg", "swarm")
+        );
+        assert_eq!(
+            repo.remote_url.as_deref(),
+            Some("git@github.com:penberg/swarm.git")
+        );
+    }
+
+    #[test]
+    fn parses_ssh_scheme_remote_url() {
+        let repo = Repository::parse("ssh://git@github.com/penberg/swarm.git", None).unwrap();
+
+        assert_eq!(
+            (repo.host.as_str(), repo.owner.as_str(), repo.name.as_str()),
+            ("github.com", "penberg", "swarm")
+        );
+        assert_eq!(
+            repo.remote_url.as_deref(),
+            Some("ssh://git@github.com/penberg/swarm.git")
+        );
     }
 }
