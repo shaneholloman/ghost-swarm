@@ -612,6 +612,25 @@ fn render_current_ui(
     render_ui(state, &groups, preferred_workspace, preferred_session);
 }
 
+fn render_selected_workspace_detail(
+    state: &Rc<AppState>,
+    workspace_ref: &str,
+    preferred_session: Option<String>,
+) {
+    let groups = current_groups(state);
+    let Some(workspace) = find_workspace_by_ref(&groups, workspace_ref) else {
+        return;
+    };
+
+    let detail_widgets = state
+        .detail_widgets
+        .borrow()
+        .as_ref()
+        .cloned()
+        .expect("detail widgets initialized");
+    detail_widgets.render_workspace(&workspace, state, preferred_session.as_deref());
+}
+
 fn render_sidebar_only(state: &Rc<AppState>) {
     let groups = current_groups(state);
     let selected_workspace = state
@@ -653,9 +672,14 @@ fn install_pr_status_pump(state: &Rc<AppState>) {
     let state = state.clone();
     glib::timeout_add_local(Duration::from_millis(50), move || {
         let mut changed = false;
+        let mut selected_workspace_changed = false;
+        let selected_workspace = state.selected_workspace.borrow().clone();
         {
             let receiver = state.pr_status_receiver.borrow_mut();
             while let Ok(update) = receiver.try_recv() {
+                if selected_workspace.as_deref() == Some(update.workspace_ref.as_str()) {
+                    selected_workspace_changed = true;
+                }
                 state
                     .pending_pr_lookups
                     .borrow_mut()
@@ -676,7 +700,13 @@ fn install_pr_status_pump(state: &Rc<AppState>) {
         }
 
         if changed {
-            render_sidebar_only(&state);
+            if selected_workspace_changed {
+                if let Some(selected_workspace) = selected_workspace.as_deref() {
+                    render_selected_workspace_detail(&state, selected_workspace, None);
+                }
+            } else {
+                render_sidebar_only(&state);
+            }
         }
 
         glib::ControlFlow::Continue
