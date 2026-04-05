@@ -1,0 +1,8 @@
+- name: Install Zig
+  id: install-zig
+  if: ${{ contains(join(matrix.targets, ','), 'linux') }}
+  run: |
+    curl --proto '=https' --tlsv1.2 -LsSf "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz" -o zig.tar.xz
+    tar -xf zig.tar.xz
+    echo "$PWD/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+  shell: bash
