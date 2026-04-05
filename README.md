@@ -2,7 +2,8 @@
   <img src=".github/assets/hero.png" width="600" alt="Swarm">
 </p>
 
-# Swarm
+<h1 align="center">Swarm</h1>
+<p align="center"><em>Herd your agents, not your terminals.</em></p>
 
 A workspace manager for parallel development. Register git repositories, spin up isolated worktrees, and run persistent terminal sessions inside them — from the CLI or a native GTK desktop app.
 
