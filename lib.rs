@@ -28,7 +28,7 @@ pub enum SwarmError {
         source: turso::Error,
     },
 
-    #[error("invalid repository `{0}`; expected host/owner/name")]
+    #[error("invalid repository `{0}`; expected host/owner/name or a full git remote URL")]
     InvalidRepository(String),
 
     #[error("repository `{0}` already exists")]

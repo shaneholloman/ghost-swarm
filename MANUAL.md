@@ -464,12 +464,12 @@ Register a repository with `swarm`.
 #### Usage
 
 ```text
-swarm repo add <host/owner/name> [--alias <name>]
+swarm repo add <host/owner/name|remote-url> [--alias <name>]
 ```
 
 #### Arguments
 
-- `<host/owner/name>`: Canonical repository identifier.
+- `<host/owner/name|remote-url>`: Canonical repository identifier or full git remote URL.
 
 #### Options
 
@@ -477,8 +477,9 @@ swarm repo add <host/owner/name> [--alias <name>]
 
 #### Behavior
 
-- Validates `host/owner/name` format.
+- Validates `host/owner/name` format or parses a full git remote URL.
 - Creates a repository record in `index.db`.
+- Stores the exact remote URL when one is provided explicitly.
 - Defaults the alias to the repository name if `--alias` is omitted.
 - Rejects duplicates.
 
@@ -487,6 +488,7 @@ swarm repo add <host/owner/name> [--alias <name>]
 ```text
 swarm repo add github.com/penberg/swarm
 swarm repo add github.com/penberg/other --alias other
+swarm repo add git@github.com:penberg/private-repo.git --alias private
 ```
 
 #### Expected Output
