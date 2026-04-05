@@ -9,11 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Support explicit repository remote URLs. (#45)
-- Persist repository form state in sidebar across navigation. (#46)
+- Support explicit repository remote URLs. ([#45](https://github.com/penberg/swarm/pull/45))
+- Persist repository form state in sidebar across navigation. ([#46](https://github.com/penberg/swarm/pull/46))
 
 ### Fixed
 
-- Refresh selected workspace PR link when switching workspaces. (#44)
-- Move session tab refresh off the UI thread to eliminate periodic freezes. (#43)
+- Refresh selected workspace PR link when switching workspaces. ([#44](https://github.com/penberg/swarm/pull/44))
+- Move session tab refresh off the UI thread to eliminate periodic freezes. ([#43](https://github.com/penberg/swarm/pull/43))
 
