@@ -2,6 +2,8 @@
 
 A workspace manager for parallel development. Register git repositories, spin up isolated worktrees, and run persistent terminal sessions inside them — from the CLI or a native GTK desktop app.
 
+![Swarm](.github/assets/hero.png)
+
 ## Motivation
 
 Coding agents are most effective when you can run many of them in parallel — one per feature, one per bug fix. But in practice, this quickly turns into chaos. Each agent needs its own copy of the source code so they don't step on each other's changes, and each one runs in its own terminal. Before long, you're drowning in terminal tabs, losing track of which agent is working on what, and manually juggling git branches and directories.
