@@ -460,6 +460,7 @@ fn build_ui(app: &Application) {
 
     let state = Rc::new(AppState {
         sidebar_host: sidebar_host.clone(),
+        sidebar_widgets: RefCell::new(None),
         detail_widgets: RefCell::new(None),
         workspace_groups: RefCell::new(Vec::new()),
         selected_workspace: RefCell::new(None),
@@ -474,6 +475,10 @@ fn build_ui(app: &Application) {
         pr_status_sender,
         pr_status_receiver: RefCell::new(pr_status_receiver),
     });
+
+    let sidebar_widgets = build_sidebar_widgets(&state);
+    sidebar_host.append(&sidebar_widgets.container);
+    *state.sidebar_widgets.borrow_mut() = Some(sidebar_widgets);
 
     let detail_widgets = DetailWidgets::new(&state);
     let content = build_content(detail_widgets.container.clone());
@@ -493,6 +498,7 @@ fn build_ui(app: &Application) {
 
 struct AppState {
     sidebar_host: GtkBox,
+    sidebar_widgets: RefCell<Option<SidebarWidgets>>,
     detail_widgets: RefCell<Option<DetailWidgets>>,
     workspace_groups: RefCell<Vec<WorkspaceGroup>>,
     selected_workspace: RefCell<Option<String>>,
@@ -506,6 +512,23 @@ struct AppState {
     pending_pr_lookups: RefCell<HashSet<String>>,
     pr_status_sender: mpsc::Sender<WorkspacePrUpdate>,
     pr_status_receiver: RefCell<mpsc::Receiver<WorkspacePrUpdate>>,
+}
+
+#[derive(Clone)]
+struct SidebarWidgets {
+    container: GtkBox,
+    add_repository_button: Button,
+    repository_form: RepositoryFormWidgets,
+    list_host: GtkBox,
+}
+
+#[derive(Clone)]
+struct RepositoryFormWidgets {
+    container: GtkBox,
+    repository_entry: Entry,
+    alias_entry: Entry,
+    error_label: Label,
+    cancel_button: Button,
 }
 
 fn remember_selected_session(state: &Rc<AppState>, workspace_ref: &str, session_id: Option<&str>) {
@@ -536,7 +559,15 @@ struct RepositoryFormState {
     expanded: bool,
     repository: String,
     alias: String,
+    focused_field: RepositoryFormField,
     error: Option<String>,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum RepositoryFormField {
+    #[default]
+    Repository,
+    Alias,
 }
 
 #[derive(Clone)]
@@ -604,14 +635,7 @@ fn render_ui(
         *state.selected_session.borrow_mut() = None;
     }
 
-    let sidebar = build_sidebar(
-        groups,
-        state.clone(),
-        detail_widgets.clone(),
-        selected_workspace,
-    );
-    clear_box(&state.sidebar_host);
-    state.sidebar_host.append(&sidebar);
+    render_sidebar_content(groups, state, detail_widgets.clone(), selected_workspace);
 }
 
 fn schedule_refresh(
@@ -671,9 +695,7 @@ fn render_sidebar_only(state: &Rc<AppState>) {
         .as_ref()
         .cloned()
         .expect("detail widgets initialized");
-    let sidebar = build_sidebar(&groups, state.clone(), detail_widgets, selected_workspace);
-    clear_box(&state.sidebar_host);
-    state.sidebar_host.append(&sidebar);
+    render_sidebar_content(&groups, state, detail_widgets, selected_workspace);
 }
 
 fn schedule_render_sidebar_only(state: &Rc<AppState>) {
@@ -681,6 +703,14 @@ fn schedule_render_sidebar_only(state: &Rc<AppState>) {
     glib::idle_add_local_once(move || {
         render_sidebar_only(&state);
     });
+}
+
+fn schedule_background_sidebar_refresh(state: &Rc<AppState>) {
+    if state.repository_form.borrow().expanded {
+        return;
+    }
+
+    schedule_render_sidebar_only(state);
 }
 
 fn schedule_render_current_ui(
@@ -730,7 +760,7 @@ fn install_pr_status_pump(state: &Rc<AppState>) {
                 if let Some(selected_workspace) = selected_workspace.as_deref() {
                     render_selected_workspace_detail(&state, selected_workspace, None);
                 }
-            } else {
+            } else if !state.repository_form.borrow().expanded {
                 render_sidebar_only(&state);
             }
         }
@@ -974,26 +1004,61 @@ fn cycle_selected_session(state: &Rc<AppState>, direction: isize) {
     schedule_refresh(state, Some(workspace_ref), Some(next_session));
 }
 
-fn build_sidebar(
+fn build_sidebar_widgets(state: &Rc<AppState>) -> SidebarWidgets {
+    let container = GtkBox::new(Orientation::Vertical, 0);
+    container.set_size_request(250, -1);
+    container.set_hexpand(false);
+    container.set_vexpand(true);
+    container.add_css_class("sidebar");
+
+    let toolbar = GtkBox::new(Orientation::Horizontal, 8);
+    toolbar.set_halign(Align::Fill);
+    toolbar.set_hexpand(true);
+    toolbar.add_css_class("sidebar-toolbar");
+
+    let add_repository_button = Button::with_label("Add repository");
+    add_repository_button.set_valign(Align::Center);
+    add_repository_button.add_css_class("sidebar-primary-action");
+    {
+        let state = state.clone();
+        add_repository_button.connect_clicked(move |_| {
+            {
+                let mut form = state.repository_form.borrow_mut();
+                form.expanded = true;
+                form.focused_field = RepositoryFormField::Repository;
+                form.error = None;
+            }
+            sync_repository_form_widgets(&state, false);
+            focus_repository_form_field(&state);
+        });
+    }
+    toolbar.append(&add_repository_button);
+
+    let repository_form = build_repository_form_widgets(state);
+    let list_host = GtkBox::new(Orientation::Vertical, 0);
+    list_host.set_hexpand(true);
+    list_host.set_vexpand(true);
+
+    container.append(&toolbar);
+    container.append(&repository_form.container);
+    container.append(&list_host);
+
+    SidebarWidgets {
+        container,
+        add_repository_button,
+        repository_form,
+        list_host,
+    }
+}
+
+fn render_sidebar_content(
     groups: &[WorkspaceGroup],
-    state: Rc<AppState>,
+    state: &Rc<AppState>,
     detail_widgets: DetailWidgets,
     selected_workspace: Option<WorkspaceEntry>,
-) -> GtkBox {
-    let sidebar = GtkBox::new(Orientation::Vertical, 0);
-    sidebar.set_size_request(250, -1);
-    sidebar.set_hexpand(false);
-    sidebar.set_vexpand(true);
-    sidebar.add_css_class("sidebar");
-
+) {
     let groups_empty = groups.is_empty();
-    let toolbar = build_sidebar_toolbar(&state, groups_empty);
-    sidebar.append(&toolbar);
-
-    if state.repository_form.borrow().expanded || groups_empty {
-        let form = build_repository_form(&state, groups_empty);
-        sidebar.append(&form);
-    }
+    sync_repository_form_widgets(state, groups_empty);
 
     let scroller = ScrolledWindow::new();
     scroller.set_policy(PolicyType::Never, PolicyType::Automatic);
@@ -1100,63 +1165,37 @@ fn build_sidebar(
         });
     }
 
-    sidebar.append(&scroller);
-    sidebar
+    let sidebar_widgets = state
+        .sidebar_widgets
+        .borrow()
+        .as_ref()
+        .cloned()
+        .expect("sidebar widgets initialized");
+    clear_box(&sidebar_widgets.list_host);
+    sidebar_widgets.list_host.append(&scroller);
 }
 
-fn build_sidebar_toolbar(state: &Rc<AppState>, groups_empty: bool) -> GtkBox {
-    let row = GtkBox::new(Orientation::Horizontal, 8);
-    row.set_halign(Align::Fill);
-    row.set_hexpand(true);
-    row.add_css_class("sidebar-toolbar");
-
-    if !groups_empty {
-        let button = Button::with_label("Add repository");
-        button.set_valign(Align::Center);
-        button.add_css_class("sidebar-primary-action");
-        {
-            let state = state.clone();
-            button.connect_clicked(move |_| {
-                let preferred_workspace = state.selected_workspace.borrow().clone();
-                let mut form = state.repository_form.borrow_mut();
-                form.expanded = true;
-                form.error = None;
-                drop(form);
-                schedule_refresh(&state, preferred_workspace, None);
-            });
-        }
-        row.append(&button);
-    }
-
-    row
-}
-
-fn build_repository_form(state: &Rc<AppState>, groups_empty: bool) -> GtkBox {
-    let form_state = state.repository_form.borrow().clone();
-
+fn build_repository_form_widgets(state: &Rc<AppState>) -> RepositoryFormWidgets {
     let card = GtkBox::new(Orientation::Vertical, 6);
     card.add_css_class("repo-compose");
 
     let repository_entry = Entry::new();
     repository_entry.set_placeholder_text(Some("github.com/owner/name"));
-    repository_entry.set_text(&form_state.repository);
     repository_entry.add_css_class("repo-compose-entry");
     card.append(&repository_entry);
 
     let alias_entry = Entry::new();
     alias_entry.set_placeholder_text(Some("Optional alias"));
-    alias_entry.set_text(&form_state.alias);
     alias_entry.add_css_class("repo-compose-entry");
     card.append(&alias_entry);
 
-    if let Some(error) = form_state.error {
-        let error_label = Label::new(Some(&error));
-        error_label.set_xalign(0.0);
-        error_label.set_wrap(true);
-        error_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        error_label.add_css_class("repo-compose-error");
-        card.append(&error_label);
-    }
+    let error_label = Label::new(None);
+    error_label.set_xalign(0.0);
+    error_label.set_wrap(true);
+    error_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    error_label.add_css_class("repo-compose-error");
+    error_label.set_visible(false);
+    card.append(&error_label);
 
     let actions = GtkBox::new(Orientation::Horizontal, 6);
 
@@ -1164,22 +1203,21 @@ fn build_repository_form(state: &Rc<AppState>, groups_empty: bool) -> GtkBox {
     submit.add_css_class("repo-compose-submit");
     actions.append(&submit);
 
-    if !groups_empty {
-        let cancel = Button::with_label("Cancel");
-        cancel.add_css_class("repo-compose-cancel");
-        {
-            let state = state.clone();
-            cancel.connect_clicked(move |_| {
-                let preferred_workspace = state.selected_workspace.borrow().clone();
+    let cancel = Button::with_label("Cancel");
+    cancel.add_css_class("repo-compose-cancel");
+    {
+        let state = state.clone();
+        cancel.connect_clicked(move |_| {
+            {
                 let mut form = state.repository_form.borrow_mut();
                 form.expanded = false;
+                form.focused_field = RepositoryFormField::Repository;
                 form.error = None;
-                drop(form);
-                schedule_refresh(&state, preferred_workspace, None);
-            });
-        }
-        actions.append(&cancel);
+            }
+            sync_repository_form_widgets(&state, false);
+        });
     }
+    actions.append(&cancel);
 
     card.append(&actions);
 
@@ -1198,6 +1236,24 @@ fn build_repository_form(state: &Rc<AppState>, groups_empty: bool) -> GtkBox {
             let mut form = state.repository_form.borrow_mut();
             form.alias = entry.text().to_string();
             form.error = None;
+        });
+    }
+
+    {
+        let state = state.clone();
+        repository_entry.connect_has_focus_notify(move |entry| {
+            if entry.has_focus() {
+                state.repository_form.borrow_mut().focused_field = RepositoryFormField::Repository;
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        alias_entry.connect_has_focus_notify(move |entry| {
+            if entry.has_focus() {
+                state.repository_form.borrow_mut().focused_field = RepositoryFormField::Alias;
+            }
         });
     }
 
@@ -1228,11 +1284,71 @@ fn build_repository_form(state: &Rc<AppState>, groups_empty: bool) -> GtkBox {
         });
     }
 
-    glib::idle_add_local_once(move || {
-        repository_entry.grab_focus();
-    });
+    RepositoryFormWidgets {
+        container: card,
+        repository_entry,
+        alias_entry,
+        error_label,
+        cancel_button: cancel,
+    }
+}
 
-    card
+fn sync_repository_form_widgets(state: &Rc<AppState>, groups_empty: bool) {
+    let form_state = state.repository_form.borrow().clone();
+    let sidebar_widgets = state
+        .sidebar_widgets
+        .borrow()
+        .as_ref()
+        .cloned()
+        .expect("sidebar widgets initialized");
+    let widgets = &sidebar_widgets.repository_form;
+
+    sidebar_widgets
+        .add_repository_button
+        .set_visible(!groups_empty);
+    widgets
+        .container
+        .set_visible(form_state.expanded || groups_empty);
+    widgets.cancel_button.set_visible(!groups_empty);
+
+    if widgets.repository_entry.text().as_str() != form_state.repository.as_str() {
+        widgets.repository_entry.set_text(&form_state.repository);
+    }
+
+    if widgets.alias_entry.text().as_str() != form_state.alias.as_str() {
+        widgets.alias_entry.set_text(&form_state.alias);
+    }
+
+    match form_state.error {
+        Some(error) => {
+            widgets.error_label.set_label(&error);
+            widgets.error_label.set_visible(true);
+        }
+        None => {
+            widgets.error_label.set_label("");
+            widgets.error_label.set_visible(false);
+        }
+    }
+}
+
+fn focus_repository_form_field(state: &Rc<AppState>) {
+    let focused_field = state.repository_form.borrow().focused_field;
+    let sidebar_widgets = state
+        .sidebar_widgets
+        .borrow()
+        .as_ref()
+        .cloned()
+        .expect("sidebar widgets initialized");
+    let widgets = sidebar_widgets.repository_form.clone();
+
+    glib::idle_add_local_once(move || match focused_field {
+        RepositoryFormField::Repository => {
+            widgets.repository_entry.grab_focus();
+        }
+        RepositoryFormField::Alias => {
+            widgets.alias_entry.grab_focus();
+        }
+    });
 }
 
 fn build_repo_row(
@@ -1539,7 +1655,7 @@ fn install_branch_monitor(state: &Rc<AppState>, workspace: &WorkspaceEntry, bran
                 clear_workspace_pr_status(&monitor_state, &workspace_ref);
                 update_cached_workspace_branch(&monitor_state, &workspace_ref, &branch);
                 label.set_text(&branch);
-                schedule_render_sidebar_only(&monitor_state);
+                schedule_background_sidebar_refresh(&monitor_state);
             }
             Err(err) => eprintln!("failed to refresh branch for {workspace_path}: {err}"),
         },
@@ -1864,11 +1980,17 @@ fn remove_selected_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
 fn submit_repository_form(state: &Rc<AppState>, repository_entry: &Entry, alias_entry: &Entry) {
     let repository = repository_entry.text().trim().to_string();
     let alias_text = alias_entry.text().trim().to_string();
+    let focused_field = if alias_entry.has_focus() {
+        RepositoryFormField::Alias
+    } else {
+        RepositoryFormField::Repository
+    };
 
     {
         let mut form = state.repository_form.borrow_mut();
         form.repository = repository.clone();
         form.alias = alias_text.clone();
+        form.focused_field = focused_field;
         form.error = None;
     }
 
@@ -1882,7 +2004,8 @@ fn submit_repository_form(state: &Rc<AppState>, repository_entry: &Entry, alias_
         }
         Err(err) => {
             state.repository_form.borrow_mut().error = Some(err.to_string());
-            schedule_refresh(state, preferred_workspace, None);
+            sync_repository_form_widgets(state, false);
+            focus_repository_form_field(state);
         }
     }
 }
@@ -2184,17 +2307,19 @@ fn install_session_tab_refresh(session_tabs: &GtkBox, sessions: &[SessionEntry])
         .collect();
     let (tx, rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
 
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(1));
-        let programs: Vec<(String, String)> = session_info
-            .iter()
-            .map(|(id, pid, fallback)| {
-                let program = foreground_program(*pid).unwrap_or_else(|| fallback.clone());
-                (id.clone(), program)
-            })
-            .collect();
-        if tx.send(programs).is_err() {
-            break;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let programs: Vec<(String, String)> = session_info
+                .iter()
+                .map(|(id, pid, fallback)| {
+                    let program = foreground_program(*pid).unwrap_or_else(|| fallback.clone());
+                    (id.clone(), program)
+                })
+                .collect();
+            if tx.send(programs).is_err() {
+                break;
+            }
         }
     });
 
