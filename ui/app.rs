@@ -21,7 +21,7 @@ use crate::{
     data::{
         SessionEntry, WorkspaceEntry, WorkspaceGroup, add_repository, clone_workspace,
         close_session, collapse_repository, create_session, create_workspace,
-        current_workspace_branch, current_workspace_head, expand_repository, load_session_programs,
+        current_workspace_branch, current_workspace_head, expand_repository, foreground_program,
         load_workspace_groups, remove_workspace, rename_workspace, sync_repository,
         workspace_head_path,
     },
@@ -2033,7 +2033,7 @@ impl DetailWidgets {
             self.session_tabs.append(&tab);
         }
         sync_session_tab_active_state(&self.session_tabs, Some(&selected_session));
-        install_session_tab_refresh(&self.session_tabs, &workspace_ref);
+        install_session_tab_refresh(&self.session_tabs, &workspace.sessions);
     }
 }
 
@@ -2146,17 +2146,37 @@ fn build_session_tab(
     tab
 }
 
-fn install_session_tab_refresh(session_tabs: &GtkBox, workspace_ref: &str) {
+fn install_session_tab_refresh(session_tabs: &GtkBox, sessions: &[SessionEntry]) {
     let session_tabs = session_tabs.downgrade();
-    let workspace_ref = workspace_ref.to_string();
-    glib::timeout_add_local(Duration::from_secs(1), move || {
+    let session_info: Vec<(String, Option<u32>, String)> = sessions
+        .iter()
+        .map(|s| (s.id.clone(), s.pid, s.program.clone()))
+        .collect();
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
+
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let programs: Vec<(String, String)> = session_info
+            .iter()
+            .map(|(id, pid, fallback)| {
+                let program = foreground_program(*pid).unwrap_or_else(|| fallback.clone());
+                (id.clone(), program)
+            })
+            .collect();
+        if tx.send(programs).is_err() {
+            break;
+        }
+    });
+
+    glib::timeout_add_local(Duration::from_millis(250), move || {
         let Some(session_tabs) = session_tabs.upgrade() else {
             return glib::ControlFlow::Break;
         };
-        if !session_tabs.is_visible() {
-            return glib::ControlFlow::Continue;
+        let mut latest = None;
+        while let Ok(programs) = rx.try_recv() {
+            latest = Some(programs);
         }
-        if let Ok(programs) = load_session_programs(&workspace_ref) {
+        if let Some(programs) = latest {
             sync_session_tab_labels(&session_tabs, &programs);
         }
         glib::ControlFlow::Continue
