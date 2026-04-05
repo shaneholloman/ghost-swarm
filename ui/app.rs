@@ -465,6 +465,7 @@ fn build_ui(app: &Application) {
         selected_workspace: RefCell::new(None),
         editing_workspace: RefCell::new(None),
         selected_session: RefCell::new(None),
+        selected_sessions: RefCell::new(HashMap::new()),
         repository_form: RefCell::new(RepositoryFormState::default()),
         branch_monitors: RefCell::new(Vec::new()),
         syncing_repositories: RefCell::new(HashSet::new()),
@@ -497,6 +498,7 @@ struct AppState {
     selected_workspace: RefCell<Option<String>>,
     editing_workspace: RefCell<Option<String>>,
     selected_session: RefCell<Option<String>>,
+    selected_sessions: RefCell<HashMap<String, String>>,
     repository_form: RefCell<RepositoryFormState>,
     branch_monitors: RefCell<Vec<FileMonitor>>,
     syncing_repositories: RefCell<HashSet<String>>,
@@ -504,6 +506,29 @@ struct AppState {
     pending_pr_lookups: RefCell<HashSet<String>>,
     pr_status_sender: mpsc::Sender<WorkspacePrUpdate>,
     pr_status_receiver: RefCell<mpsc::Receiver<WorkspacePrUpdate>>,
+}
+
+fn remember_selected_session(state: &Rc<AppState>, workspace_ref: &str, session_id: Option<&str>) {
+    *state.selected_session.borrow_mut() = session_id.map(str::to_string);
+    let mut selected_sessions = state.selected_sessions.borrow_mut();
+    match session_id {
+        Some(session_id) => {
+            selected_sessions.insert(workspace_ref.to_string(), session_id.to_string());
+        }
+        None => {
+            selected_sessions.remove(workspace_ref);
+        }
+    }
+}
+
+fn preferred_session_for_workspace(
+    state: &Rc<AppState>,
+    workspace_ref: &str,
+    preferred_session: Option<&str>,
+) -> Option<String> {
+    preferred_session
+        .map(str::to_string)
+        .or_else(|| state.selected_sessions.borrow().get(workspace_ref).cloned())
 }
 
 #[derive(Clone, Default)]
@@ -569,8 +594,9 @@ fn render_ui(
         .cloned()
         .expect("detail widgets initialized");
     if let Some(workspace) = selected_workspace.as_ref() {
+        let workspace_ref = workspace_ref(workspace);
+        *state.selected_workspace.borrow_mut() = Some(workspace_ref);
         detail_widgets.render_workspace(workspace, state, preferred_session.as_deref());
-        *state.selected_workspace.borrow_mut() = Some(workspace_ref(workspace));
     } else {
         detail_widgets.render_empty();
         *state.selected_workspace.borrow_mut() = None;
@@ -914,7 +940,7 @@ fn cycle_selected_session(state: &Rc<AppState>, direction: isize) {
     let next_index = (current_index as isize + direction).rem_euclid(session_count) as usize;
     let next_session = workspace.sessions[next_index].id.clone();
 
-    *state.selected_session.borrow_mut() = Some(next_session.clone());
+    remember_selected_session(state, &workspace_ref, Some(&next_session));
     schedule_refresh(state, Some(workspace_ref), Some(next_session));
 }
 
@@ -1031,16 +1057,12 @@ fn build_sidebar(
                     .borrow()
                     .as_ref()
                     .is_some_and(|selected| selected == &next_workspace_ref);
-                let preferred_session = if preserve_session {
-                    state.selected_session.borrow().clone()
-                } else {
-                    None
-                };
-
                 if preserve_session {
                     return;
                 }
 
+                let preferred_session =
+                    preferred_session_for_workspace(&state, &next_workspace_ref, None);
                 *state.selected_workspace.borrow_mut() = Some(next_workspace_ref);
                 *state.selected_session.borrow_mut() = preferred_session.clone();
                 detail_widgets.render_workspace(&workspace, &state, preferred_session.as_deref());
@@ -1526,7 +1548,7 @@ fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
             *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
             *state.editing_workspace.borrow_mut() = Some(workspace_ref.clone());
-            *state.selected_session.borrow_mut() = selected_session;
+            remember_selected_session(state, &workspace_ref, selected_session.as_deref());
             schedule_render_current_ui(state, Some(workspace_ref), preferred_session);
         }
         Err(err) => {
@@ -1554,7 +1576,7 @@ fn clone_and_edit_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
             *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.selected_workspace.borrow_mut() = Some(workspace_ref.clone());
             *state.editing_workspace.borrow_mut() = Some(workspace_ref.clone());
-            *state.selected_session.borrow_mut() = selected_session;
+            remember_selected_session(state, &workspace_ref, selected_session.as_deref());
             schedule_render_current_ui(state, Some(workspace_ref), preferred_session);
         }
         Err(err) => {
@@ -1755,7 +1777,11 @@ fn commit_workspace_rename(state: &Rc<AppState>, current_workspace_ref: &str, ne
             }
             *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.selected_workspace.borrow_mut() = Some(next_workspace_ref.clone());
-            *state.selected_session.borrow_mut() = None;
+            let remembered_session = state
+                .selected_sessions
+                .borrow_mut()
+                .remove(current_workspace_ref);
+            remember_selected_session(state, &next_workspace_ref, remembered_session.as_deref());
             schedule_render_current_ui(state, Some(next_workspace_ref), None);
         }
         Err(err) => {
@@ -1791,6 +1817,10 @@ fn remove_selected_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
             *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.selected_workspace.borrow_mut() = next_workspace.clone();
             *state.editing_workspace.borrow_mut() = None;
+            state
+                .selected_sessions
+                .borrow_mut()
+                .remove(&removed_workspace_ref);
             *state.selected_session.borrow_mut() = None;
             schedule_render_current_ui(state, next_workspace, None);
         }
@@ -1893,7 +1923,11 @@ impl DetailWidgets {
             let session_tabs = session_tabs.clone();
             session_stack.connect_visible_child_name_notify(move |stack| {
                 let selected_session = stack.visible_child_name().map(|name| name.to_string());
-                *state.selected_session.borrow_mut() = selected_session.clone();
+                if let Some(workspace_ref) = state.selected_workspace.borrow().clone() {
+                    remember_selected_session(&state, &workspace_ref, selected_session.as_deref());
+                } else {
+                    *state.selected_session.borrow_mut() = selected_session.clone();
+                }
                 sync_session_tab_active_state(&session_tabs, selected_session.as_deref());
                 focus_visible_terminal(stack);
             });
@@ -1968,19 +2002,19 @@ impl DetailWidgets {
                 .add_titled(&host, Some(&session.id), &session.program);
         }
 
-        let selected_session = preferred_session
-            .map(str::to_string)
-            .or_else(|| state.selected_session.borrow().clone())
-            .filter(|selected| {
-                workspace
-                    .sessions
-                    .iter()
-                    .any(|session| session.id == *selected)
-            })
-            .unwrap_or_else(|| workspace.sessions[0].id.clone());
+        let workspace_ref = workspace_ref(workspace);
+        let selected_session =
+            preferred_session_for_workspace(state, &workspace_ref, preferred_session)
+                .filter(|selected| {
+                    workspace
+                        .sessions
+                        .iter()
+                        .any(|session| session.id == *selected)
+                })
+                .unwrap_or_else(|| workspace.sessions[0].id.clone());
+        remember_selected_session(state, &workspace_ref, Some(&selected_session));
         self.session_stack.set_visible_child_name(&selected_session);
 
-        let workspace_ref = workspace_ref(workspace);
         let session_ids = workspace
             .sessions
             .iter()
@@ -2082,11 +2116,12 @@ fn build_session_tab(
     select_button.add_css_class("session-tab-select");
     {
         let state = state.clone();
+        let workspace_ref = workspace_ref.to_string();
         let session_id = session.id.clone();
         let session_tabs = session_tabs.clone();
         let session_stack = session_stack.clone();
         select_button.connect_clicked(move |_| {
-            *state.selected_session.borrow_mut() = Some(session_id.clone());
+            remember_selected_session(&state, &workspace_ref, Some(&session_id));
             session_stack.set_visible_child_name(&session_id);
             sync_session_tab_active_state(&session_tabs, Some(&session_id));
         });
@@ -2163,7 +2198,7 @@ fn create_and_select_session(state: &Rc<AppState>, workspace_id: &str) {
             }
             *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.selected_workspace.borrow_mut() = Some(workspace_id.to_string());
-            *state.selected_session.borrow_mut() = Some(session.id.clone());
+            remember_selected_session(state, workspace_id, Some(&session.id));
             schedule_render_current_ui(state, Some(workspace_id.to_string()), Some(session.id));
         }
         Err(err) => {
@@ -2201,7 +2236,7 @@ fn close_specific_session(
             }
             *state.workspace_groups.borrow_mut() = next_groups.clone();
             *state.selected_workspace.borrow_mut() = Some(workspace_id.to_string());
-            *state.selected_session.borrow_mut() = next_selected;
+            remember_selected_session(state, workspace_id, next_selected.as_deref());
             schedule_render_current_ui(state, Some(workspace_id.to_string()), preferred_session);
         }
         Err(err) => {
