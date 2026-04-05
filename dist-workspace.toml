@@ -18,13 +18,13 @@ install-updater = false
 
 # Linux system dependencies for dist builds and documented local UI builds.
 [dist.dependencies.apt]
-gcc = "*"
+"gcc" = "*"
 "g++" = "*"
-libcairo2-dev = "*"
-libglib2.0-dev = "*"
-libgtk-4-dev = "*"
+"libcairo2-dev" = "*"
+"libglib2.0-dev" = "*"
+"libgtk-4-dev" = "*"
 "libpango1.0-dev" = "*"
-pkg-config = "*"
+"pkg-config" = "*"
 
 [dist.github-custom-runners]
 x86_64-unknown-linux-gnu = "ubuntu-24.04"
