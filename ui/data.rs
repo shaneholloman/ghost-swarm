@@ -313,18 +313,6 @@ pub fn close_session(session_id: &str) -> Result<SessionEntry, SwarmError> {
     })
 }
 
-pub fn load_session_programs(workspace_ref: &str) -> Result<Vec<(String, String)>, SwarmError> {
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async {
-        let session_store = SessionStore::open().await?;
-        let sessions = session_store.list(Some(workspace_ref)).await?;
-        Ok(sessions
-            .into_iter()
-            .map(|session| (session.id, session_program(session.pid, &session.command)))
-            .collect())
-    })
-}
-
 pub fn current_workspace_branch(path: &str) -> Result<String, SwarmError> {
     let path = Path::new(path);
     let branch = run_git(path, ["branch", "--show-current"])?;
@@ -440,7 +428,7 @@ fn session_program(pid: Option<u32>, command: &[String]) -> String {
     foreground_program(pid).unwrap_or_else(|| command_program(command))
 }
 
-fn foreground_program(pid: Option<u32>) -> Option<String> {
+pub fn foreground_program(pid: Option<u32>) -> Option<String> {
     let stat = read_proc_stat(pid?).ok()?;
     if stat.tpgid <= 0 || stat.tty_nr == 0 {
         return None;
