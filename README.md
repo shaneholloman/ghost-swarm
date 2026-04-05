@@ -12,13 +12,13 @@ A workspace manager for parallel development. Register git repositories, spin up
 Install the latest prebuilt release on supported platforms with:
 
 ```console
-> curl --proto '=https' --tlsv1.2 -LsSf https://github.com/penberg/swarm/releases/latest/download/swarm-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/penberg/swarm/releases/latest/download/swarm-installer.sh | sh
 ```
 
 Then start the GUI with:
 
 ```console
-> swarm
+swarm
 ```
 
 ## Motivation
