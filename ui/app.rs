@@ -595,7 +595,6 @@ fn refresh_ui(
     preferred_workspace: Option<String>,
     preferred_session: Option<String>,
 ) {
-    state.branch_monitors.borrow_mut().clear();
     let groups = match load_workspace_groups() {
         Ok(groups) => groups,
         Err(err) => {
@@ -1057,6 +1056,8 @@ fn render_sidebar_content(
     detail_widgets: DetailWidgets,
     selected_workspace: Option<WorkspaceEntry>,
 ) {
+    clear_branch_monitors(state);
+
     let groups_empty = groups.is_empty();
     sync_repository_form_widgets(state, groups_empty);
 
@@ -1173,6 +1174,14 @@ fn render_sidebar_content(
         .expect("sidebar widgets initialized");
     clear_box(&sidebar_widgets.list_host);
     sidebar_widgets.list_host.append(&scroller);
+}
+
+fn clear_branch_monitors(state: &Rc<AppState>) {
+    let mut monitors = state.branch_monitors.borrow_mut();
+    for monitor in monitors.iter() {
+        monitor.cancel();
+    }
+    monitors.clear();
 }
 
 fn build_repository_form_widgets(state: &Rc<AppState>) -> RepositoryFormWidgets {
