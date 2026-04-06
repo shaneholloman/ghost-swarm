@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-04-06
+
+### Fixed
+
+- Fix branch monitor file descriptor leak.
+- Cache terminal widgets to fix garbled output on tab switch. ([#47](https://github.com/penberg/swarm/pull/47))
+- Preserve terminal focus across periodic PR status refreshes. ([#48](https://github.com/penberg/swarm/pull/48))
+- Suffix cloned workspace names from the source workspace so cloning no longer fails when a previously removed workspace's directory still exists on disk.
+
 ## [0.1.1] - 2026-04-05
 
 ### Added
