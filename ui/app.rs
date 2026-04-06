@@ -1000,7 +1000,16 @@ fn cycle_selected_session(state: &Rc<AppState>, direction: isize) {
     let next_session = workspace.sessions[next_index].id.clone();
 
     remember_selected_session(state, &workspace_ref, Some(&next_session));
-    schedule_refresh(state, Some(workspace_ref), Some(next_session));
+
+    // Switch the visible child in the existing stack instead of destroying
+    // and recreating all terminal widgets via schedule_refresh. Rebuilding
+    // from scratch causes garbled output because terminals are re-populated
+    // from log files while the socket pump races to deliver new data.
+    if let Some(detail_widgets) = state.detail_widgets.borrow().as_ref() {
+        detail_widgets
+            .session_stack
+            .set_visible_child_name(&next_session);
+    }
 }
 
 fn build_sidebar_widgets(state: &Rc<AppState>) -> SidebarWidgets {
@@ -2048,6 +2057,7 @@ struct DetailWidgets {
     session_tabs: GtkBox,
     session_toolbar_spacer: GtkBox,
     session_stack: Stack,
+    terminal_cache: Rc<RefCell<HashMap<String, GtkBox>>>,
 }
 
 struct WorkspaceRow {
@@ -2105,6 +2115,7 @@ impl DetailWidgets {
             session_tabs,
             session_toolbar_spacer,
             session_stack,
+            terminal_cache: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -2158,11 +2169,15 @@ impl DetailWidgets {
             return;
         }
 
+        let mut cache = self.terminal_cache.borrow_mut();
         for session in &workspace.sessions {
-            let host = ghostty::terminal_host(session);
+            let host = cache
+                .entry(session.id.clone())
+                .or_insert_with(|| ghostty::terminal_host(session));
             self.session_stack
-                .add_titled(&host, Some(&session.id), &session.program);
+                .add_titled(host, Some(&session.id), &session.program);
         }
+        drop(cache);
 
         let workspace_ref = workspace_ref(workspace);
         let selected_session =
@@ -2248,6 +2263,7 @@ fn focus_visible_terminal(session_stack: &Stack) {
 
     glib::idle_add_local_once(move || {
         if let Some(area) = host.first_child() {
+            area.queue_draw();
             area.grab_focus();
         } else {
             host.grab_focus();
@@ -2404,6 +2420,12 @@ fn close_specific_session(
 
     match close_session(session_id) {
         Ok(_) => {
+            if let Some(detail_widgets) = state.detail_widgets.borrow().as_ref() {
+                detail_widgets
+                    .terminal_cache
+                    .borrow_mut()
+                    .remove(session_id);
+            }
             let preferred_session = next_selected.clone();
             let mut next_groups = current_groups(state);
             for group in &mut next_groups {
