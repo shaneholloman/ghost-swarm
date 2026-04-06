@@ -1722,9 +1722,8 @@ fn create_and_edit_workspace(state: &Rc<AppState>, repo_canonical: &str) {
 }
 
 fn clone_and_edit_workspace(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
-    let placeholder = next_workspace_clone_name(state, workspace);
     let source_workspace_ref = workspace_ref(workspace);
-    match clone_workspace(&source_workspace_ref, &placeholder) {
+    match clone_workspace(&source_workspace_ref, &workspace.name) {
         Ok(workspace) => {
             let workspace_ref = workspace_ref(&workspace);
             let selected_session = workspace.sessions.first().map(|session| session.id.clone());
@@ -2028,28 +2027,6 @@ fn submit_repository_form(state: &Rc<AppState>, repository_entry: &Entry, alias_
     }
 }
 
-fn next_workspace_placeholder(state: &Rc<AppState>) -> String {
-    let groups = current_groups(state);
-    for index in 1.. {
-        let candidate = format!("new-{index}");
-        let exists = groups.iter().any(|group| {
-            group
-                .workspaces
-                .iter()
-                .any(|workspace| workspace.name == candidate)
-        });
-        if !exists {
-            return candidate;
-        }
-    }
-
-    "new".to_string()
-}
-
-fn next_workspace_clone_name(state: &Rc<AppState>, workspace: &WorkspaceEntry) -> String {
-    let _ = workspace;
-    next_workspace_placeholder(state)
-}
 #[derive(Clone)]
 struct DetailWidgets {
     container: GtkBox,

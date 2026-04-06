@@ -100,31 +100,12 @@ impl WorkspaceStore {
             .find_workspace(&db, &repo, &reference.workspace)
             .await?
             .ok_or_else(|| SwarmError::WorkspaceNotFound(workspace.to_string()))?;
-        let workspace_name = resolve_workspace_name(Some(name))?;
-
-        if self
-            .find_workspace(&db, &repo, &workspace_name)
-            .await?
-            .is_some()
-        {
-            return Err(SwarmError::DuplicateWorkspace(format!(
-                "{}:{}",
-                repo.alias.as_deref().unwrap_or(&repo.name),
-                workspace_name
-            )));
-        }
-
+        let requested_name = resolve_workspace_name(Some(name))?;
         let workspaces_dir = self.repos.workspaces_dir(&repo);
         fs::create_dir_all(&workspaces_dir)?;
+        let workspace_name =
+            Self::allocate_workspace_name(&db, &workspaces_dir, &requested_name).await?;
         let workspace_path = workspaces_dir.join(&workspace_name);
-
-        if workspace_path.exists() {
-            return Err(SwarmError::DuplicateWorkspace(format!(
-                "{}:{}",
-                repo.alias.as_deref().unwrap_or(&repo.name),
-                workspace_name
-            )));
-        }
 
         let bare_repo_path = self.repos.bare_repo_path(&repo);
         let branch = self.materialize_cloned_worktree(
