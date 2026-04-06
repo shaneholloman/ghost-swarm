@@ -7,9 +7,16 @@
 
 Swarm is a workspace manager for parallel coding agent development, similar to [cmux](https://github.com/manaflow-ai/cmux), [Superset](https://github.com/superset-sh/superset), and [Conductor](https://www.conductor.build/). Register git repositories, spin up isolated worktrees, and run persistent terminal sessions inside them from a native GTK desktop app or the CLI.
 
+## Features
+
+- **Workspace per feature using git worktrees** — every workspace is an isolated git worktree, so parallel agents never share a checkout or step on each other's branches.
+- **Fast workspace cloning** — branch off an existing workspace into a new worktree and branch in one command.
+- **Multi-repository management** — register any number of GitHub repositories and manage their workspaces and sessions from one place.
+- **Ghostty-backed persistent terminals** — sessions are backed by `libghostty-vt` and survive disconnects; detach and reattach from the GUI or CLI without killing the process.
+
 ## Installation
 
-Install the latest prebuilt release on supported platforms with:
+Swarm runs on Linux. Install the latest prebuilt release with:
 
 ```console
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/penberg/swarm/releases/latest/download/swarm-installer.sh | sh
