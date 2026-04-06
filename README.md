@@ -5,7 +5,7 @@
 <h1 align="center">Swarm</h1>
 <p align="center"><em>Herd your agents, not your terminals.</em></p>
 
-A workspace manager for parallel development. Register git repositories, spin up isolated worktrees, and run persistent terminal sessions inside them — from the CLI or a native GTK desktop app.
+Swarm is a workspace manager for parallel coding agent development, similar to [cmux](https://github.com/manaflow-ai/cmux), [Superset](https://github.com/superset-sh/superset), and [Conductor](https://www.conductor.build/). Register git repositories, spin up isolated worktrees, and run persistent terminal sessions inside them from a native GTK desktop app or the CLI.
 
 ## Installation
 
