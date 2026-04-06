@@ -2130,6 +2130,15 @@ impl DetailWidgets {
         state: &Rc<AppState>,
         preferred_session: Option<&str>,
     ) {
+        // Fast path: if the session set already matches what's rendered,
+        // avoid clearing the stack. Removing and re-adding the terminal
+        // DrawingArea drops keyboard focus on every periodic refresh (e.g.
+        // PR status polling), which causes the active terminal to lose
+        // focus every few seconds.
+        if self.refresh_in_place(workspace, state, preferred_session) {
+            return;
+        }
+
         clear_box(&self.session_toolbar);
         clear_stack(&self.session_stack);
 
@@ -2211,6 +2220,68 @@ impl DetailWidgets {
         }
         sync_session_tab_active_state(&self.session_tabs, Some(&selected_session));
         install_session_tab_refresh(&self.session_tabs, &workspace.sessions);
+    }
+
+    fn refresh_in_place(
+        &self,
+        workspace: &WorkspaceEntry,
+        state: &Rc<AppState>,
+        preferred_session: Option<&str>,
+    ) -> bool {
+        if workspace.sessions.is_empty() {
+            return false;
+        }
+
+        let mut stack_child_count = 0usize;
+        let mut child = self.session_stack.first_child();
+        while let Some(widget) = child {
+            stack_child_count += 1;
+            child = widget.next_sibling();
+        }
+        if stack_child_count != workspace.sessions.len() {
+            return false;
+        }
+
+        for session in &workspace.sessions {
+            if self.session_stack.child_by_name(&session.id).is_none() {
+                return false;
+            }
+        }
+
+        self.refresh_pr_link(workspace, state);
+
+        let workspace_ref = workspace_ref(workspace);
+        if let Some(requested) = preferred_session {
+            if workspace.sessions.iter().any(|s| s.id == requested) {
+                remember_selected_session(state, &workspace_ref, Some(requested));
+                let currently_visible = self
+                    .session_stack
+                    .visible_child_name()
+                    .map(|name| name.to_string());
+                if currently_visible.as_deref() != Some(requested) {
+                    self.session_stack.set_visible_child_name(requested);
+                }
+            }
+        }
+
+        true
+    }
+
+    fn refresh_pr_link(&self, workspace: &WorkspaceEntry, state: &Rc<AppState>) {
+        let mut child = self.session_toolbar.first_child();
+        while let Some(widget) = child {
+            let next = widget.next_sibling();
+            if widget.has_css_class("session-pr-link") {
+                self.session_toolbar.remove(&widget);
+            }
+            child = next;
+        }
+
+        if let WorkspacePrState::Ready(status) = workspace_pr_snapshot(state, workspace) {
+            if let Some(link) = build_workspace_pr_link(&status) {
+                self.session_toolbar.append(&link);
+            }
+        }
     }
 }
 
