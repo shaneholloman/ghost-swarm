@@ -1,19 +1,15 @@
-use gtk::{Align, Box as GtkBox, Button, LinkButton, Orientation, Stack, glib, prelude::*};
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    rc::Rc,
-    time::Duration,
-};
-use swarm::forges::github::PullRequestStatus;
+use gtk::{glib, prelude::*, Align, Box as GtkBox, Button, LinkButton, Orientation, Stack};
+use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc, sync::mpsc, time::Duration};
+use swarm::forges::github::{self, PullRequestStatus};
 
 use crate::{
     app::{
-        AppState, WorkspacePrState, clear_box, current_groups, preferred_session_for_workspace,
-        remember_selected_session, schedule_render_current_ui, workspace_pr_snapshot,
-        workspace_ref,
+        clear_box, clear_workspace_pr_status, current_groups, preferred_session_for_workspace,
+        remember_selected_session, render_selected_workspace_detail, request_workspace_pr_status,
+        schedule_render_current_ui, workspace_pr_snapshot, workspace_ref, AppState,
+        WorkspacePrState,
     },
-    data::{SessionEntry, WorkspaceEntry, close_session, create_session, foreground_program},
+    data::{close_session, create_session, foreground_program, SessionEntry, WorkspaceEntry},
     ghostty,
 };
 
@@ -118,10 +114,18 @@ impl DetailWidgets {
         self.session_toolbar.append(&add_button);
         self.session_toolbar.append(&self.session_toolbar_spacer);
 
-        if let WorkspacePrState::Ready(status) = workspace_pr_snapshot(state, workspace) {
-            if let Some(link) = build_workspace_pr_link(&status) {
-                self.session_toolbar.append(&link);
+        match workspace_pr_snapshot(state, workspace) {
+            WorkspacePrState::Ready(status) => {
+                if let Some(link) = build_workspace_pr_link(&status) {
+                    self.session_toolbar.append(&link);
+                }
             }
+            WorkspacePrState::None => {
+                if let Some(button) = build_workspace_create_pr_button(state, workspace) {
+                    self.session_toolbar.append(&button);
+                }
+            }
+            WorkspacePrState::Loading => {}
         }
 
         if workspace.sessions.is_empty() {
@@ -231,16 +235,25 @@ impl DetailWidgets {
         let mut child = self.session_toolbar.first_child();
         while let Some(widget) = child {
             let next = widget.next_sibling();
-            if widget.has_css_class("session-pr-link") {
+            if widget.has_css_class("session-pr-link") || widget.has_css_class("session-pr-create")
+            {
                 self.session_toolbar.remove(&widget);
             }
             child = next;
         }
 
-        if let WorkspacePrState::Ready(status) = workspace_pr_snapshot(state, workspace) {
-            if let Some(link) = build_workspace_pr_link(&status) {
-                self.session_toolbar.append(&link);
+        match workspace_pr_snapshot(state, workspace) {
+            WorkspacePrState::Ready(status) => {
+                if let Some(link) = build_workspace_pr_link(&status) {
+                    self.session_toolbar.append(&link);
+                }
             }
+            WorkspacePrState::None => {
+                if let Some(button) = build_workspace_create_pr_button(state, workspace) {
+                    self.session_toolbar.append(&button);
+                }
+            }
+            WorkspacePrState::Loading => {}
         }
     }
 }
@@ -256,6 +269,137 @@ fn build_workspace_pr_link(status: &PullRequestStatus) -> Option<LinkButton> {
     link.add_css_class("session-pr-link");
     link.set_tooltip_text(Some(url));
     Some(link)
+}
+
+fn build_workspace_create_pr_button(
+    state: &Rc<AppState>,
+    workspace: &WorkspaceEntry,
+) -> Option<Button> {
+    let workspace_path = Path::new(&workspace.path);
+    if !github::is_github_workspace(workspace_path) {
+        return None;
+    }
+
+    let workspace_id = workspace_ref(workspace);
+    let in_flight = state
+        .creating_pr_workspaces
+        .borrow()
+        .contains(&workspace_id);
+    let commits_ahead = github::workspace_commits_ahead(workspace_path);
+
+    let (label, tooltip, enabled) = if in_flight {
+        ("Creating PR…", "Creating pull request".to_string(), false)
+    } else {
+        match commits_ahead {
+            Some(0) => (
+                "Create PR",
+                "No commits ahead of base branch".to_string(),
+                false,
+            ),
+            Some(n) => (
+                "Create PR",
+                format!(
+                    "Create pull request ({n} commit{} ahead)",
+                    if n == 1 { "" } else { "s" }
+                ),
+                true,
+            ),
+            None => (
+                "Create PR",
+                "Unable to determine branch status".to_string(),
+                false,
+            ),
+        }
+    };
+
+    let button = Button::with_label(label);
+    button.set_halign(Align::End);
+    button.set_valign(Align::Center);
+    button.add_css_class("session-pr-create");
+    button.set_tooltip_text(Some(&tooltip));
+    button.set_sensitive(enabled);
+
+    if enabled {
+        let state = state.clone();
+        let workspace = workspace.clone();
+        button.connect_clicked(move |_| {
+            start_pr_creation(&state, &workspace);
+        });
+    }
+
+    Some(button)
+}
+
+fn start_pr_creation(state: &Rc<AppState>, workspace: &WorkspaceEntry) {
+    let workspace_id = workspace_ref(workspace);
+    {
+        let mut in_flight = state.creating_pr_workspaces.borrow_mut();
+        if in_flight.contains(&workspace_id) {
+            return;
+        }
+        in_flight.insert(workspace_id.clone());
+    }
+
+    if let Some(selected) = state.selected_workspace.borrow().clone() {
+        if selected == workspace_id {
+            render_selected_workspace_detail(state, &selected, None);
+        }
+    }
+
+    let workspace_path = workspace.path.clone();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(github::create_pull_request(Path::new(&workspace_path)));
+    });
+
+    let state_for_completion = state.clone();
+    let workspace_id_for_completion = workspace_id.clone();
+    let workspace_for_completion = workspace.clone();
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        match receiver.try_recv() {
+            Ok(result) => {
+                state_for_completion
+                    .creating_pr_workspaces
+                    .borrow_mut()
+                    .remove(&workspace_id_for_completion);
+
+                if let Err(err) = &result {
+                    eprintln!(
+                        "failed to create pull request for {workspace_id_for_completion}: {err}"
+                    );
+                }
+
+                clear_workspace_pr_status(&state_for_completion, &workspace_id_for_completion);
+                request_workspace_pr_status(&state_for_completion, &workspace_for_completion, true);
+
+                if let Some(selected) = state_for_completion.selected_workspace.borrow().clone() {
+                    if selected == workspace_id_for_completion {
+                        render_selected_workspace_detail(&state_for_completion, &selected, None);
+                    }
+                }
+
+                glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                state_for_completion
+                    .creating_pr_workspaces
+                    .borrow_mut()
+                    .remove(&workspace_id_for_completion);
+                eprintln!(
+                    "failed to create pull request for {workspace_id_for_completion}: worker disconnected"
+                );
+
+                if let Some(selected) = state_for_completion.selected_workspace.borrow().clone() {
+                    if selected == workspace_id_for_completion {
+                        render_selected_workspace_detail(&state_for_completion, &selected, None);
+                    }
+                }
+
+                glib::ControlFlow::Break
+            }
+        }
+    });
 }
 
 fn clear_stack(stack: &Stack) {
@@ -357,19 +501,17 @@ fn install_session_tab_refresh(session_tabs: &GtkBox, sessions: &[SessionEntry])
         .collect();
     let (tx, rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
 
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-            let programs: Vec<(String, String)> = session_info
-                .iter()
-                .map(|(id, pid, fallback)| {
-                    let program = foreground_program(*pid).unwrap_or_else(|| fallback.clone());
-                    (id.clone(), program)
-                })
-                .collect();
-            if tx.send(programs).is_err() {
-                break;
-            }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let programs: Vec<(String, String)> = session_info
+            .iter()
+            .map(|(id, pid, fallback)| {
+                let program = foreground_program(*pid).unwrap_or_else(|| fallback.clone());
+                (id.clone(), program)
+            })
+            .collect();
+        if tx.send(programs).is_err() {
+            break;
         }
     });
 
@@ -475,4 +617,3 @@ fn close_specific_session(
         }
     }
 }
-

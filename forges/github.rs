@@ -35,7 +35,154 @@ pub fn workspace_pull_request_status(workspace_path: &Path) -> Option<PullReques
     parse_pull_request_status(&output.stdout).ok().flatten()
 }
 
-fn is_github_workspace(workspace_path: &Path) -> bool {
+/// Returns the number of commits the workspace branch is ahead of its base
+/// branch (e.g. `origin/main`). Returns `None` if the base branch cannot be
+/// determined or the count cannot be computed.
+pub fn workspace_commits_ahead(workspace_path: &Path) -> Option<u32> {
+    let base = workspace_base_ref(workspace_path)?;
+    let range = format!("{base}..HEAD");
+    let output = Command::new("git")
+        .current_dir(workspace_path)
+        .args(["rev-list", "--count", range.as_str()])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Creates a pull request for the workspace branch using `gh pr create --fill`.
+/// Returns `Ok(())` on success or an error message captured from `gh`.
+pub fn create_pull_request(workspace_path: &Path) -> Result<(), String> {
+    if !is_github_workspace(workspace_path) {
+        return Err("not a GitHub workspace".to_string());
+    }
+
+    let branch = workspace_branch_name(workspace_path)?;
+    let base = workspace_base_branch(workspace_path);
+    push_workspace_branch(workspace_path)?;
+
+    let mut command = Command::new("gh");
+    command.current_dir(workspace_path);
+    command.args(["pr", "create", "--fill", "--head", branch.as_str()]);
+    if let Some(base) = base.as_deref() {
+        command.args(["--base", base]);
+    }
+
+    let output = command
+        .output()
+        .map_err(|err| format!("failed to spawn gh: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = format_command_stderr(&output.stderr);
+        if stderr.is_empty() {
+            return Err(format!("gh pr create failed with status {}", output.status));
+        }
+        return Err(stderr);
+    }
+
+    Ok(())
+}
+
+fn push_workspace_branch(workspace_path: &Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .current_dir(workspace_path)
+        .args(["push", "--set-upstream", "origin", "HEAD"])
+        .output()
+        .map_err(|err| format!("failed to spawn git push: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err(format!("git push failed with status {}", output.status));
+        }
+        return Err(stderr);
+    }
+
+    Ok(())
+}
+
+fn workspace_branch_name(workspace_path: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .current_dir(workspace_path)
+        .args(["branch", "--show-current"])
+        .output()
+        .map_err(|err| format!("failed to spawn git branch: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err(format!("git branch failed with status {}", output.status));
+        }
+        return Err(stderr);
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Err("unable to determine current branch".to_string());
+    }
+
+    Ok(branch)
+}
+
+fn workspace_base_branch(workspace_path: &Path) -> Option<String> {
+    workspace_base_ref(workspace_path)
+        .and_then(|base| base.strip_prefix("origin/").map(str::to_string))
+}
+
+fn workspace_base_ref(workspace_path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .current_dir(workspace_path)
+        .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !value.is_empty() && value != "HEAD" {
+            return Some(value);
+        }
+    }
+
+    for fallback in ["origin/main", "origin/master"] {
+        let exists = Command::new("git")
+            .current_dir(workspace_path)
+            .args(["rev-parse", "--verify", "--quiet", fallback])
+            .output()
+            .ok()?;
+        if exists.status.success() {
+            return Some(fallback.to_string());
+        }
+    }
+
+    None
+}
+
+fn format_command_stderr(stderr: &[u8]) -> String {
+    let lines: Vec<String> = String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let meaningful: Vec<String> = lines
+        .iter()
+        .filter(|line| !line.starts_with("Warning:"))
+        .cloned()
+        .collect();
+
+    if meaningful.is_empty() {
+        lines.join("\n")
+    } else {
+        meaningful.join("\n")
+    }
+}
+
+pub fn is_github_workspace(workspace_path: &Path) -> bool {
     let output = Command::new("git")
         .current_dir(workspace_path)
         .args(["config", "--get", "remote.origin.url"])
@@ -156,7 +303,9 @@ fn is_pending_check(check: &Value) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{PullRequestStatusState, parse_pull_request_status, summarize_checks};
+    use super::{
+        format_command_stderr, parse_pull_request_status, summarize_checks, PullRequestStatusState,
+    };
 
     #[test]
     fn reports_failing_checks() {
@@ -234,5 +383,28 @@ mod tests {
             .expect("payload should parse");
 
         assert!(status.is_none());
+    }
+
+    #[test]
+    fn drops_warning_lines_when_real_error_exists() {
+        let stderr = br#"
+Warning: 1 uncommitted change
+aborted: you must first push the current branch to a remote, or use the --head flag
+"#;
+
+        assert_eq!(
+            format_command_stderr(stderr),
+            "aborted: you must first push the current branch to a remote, or use the --head flag"
+        );
+    }
+
+    #[test]
+    fn keeps_warning_when_it_is_the_only_output() {
+        let stderr = b"Warning: 1 uncommitted change\n";
+
+        assert_eq!(
+            format_command_stderr(stderr),
+            "Warning: 1 uncommitted change"
+        );
     }
 }
