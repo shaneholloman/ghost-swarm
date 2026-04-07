@@ -1,6 +1,7 @@
 use gtk::{
     Adjustment, Box as GtkBox, DrawingArea, EventControllerKey, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, Orientation, Scrollbar, gdk, glib, pango, prelude::*,
+    EventControllerScrollFlags, GestureClick, IMMulticontext, Orientation, Scrollbar, gdk, glib,
+    pango, prelude::*,
 };
 use libghostty_vt::{
     RenderState, Terminal, TerminalOptions, ffi,
@@ -126,13 +127,26 @@ fn install_socket_pump(state: Rc<RefCell<SessionTerminalState>>) {
 
 fn install_key_controller(area: &DrawingArea, state: Rc<RefCell<SessionTerminalState>>) {
     let controller = EventControllerKey::new();
+    let im_context = IMMulticontext::new();
+    im_context.set_client_widget(Some(area));
+    im_context.set_use_preedit(false);
+    {
+        let state = state.clone();
+        im_context.connect_commit(move |_context, text| {
+            if let Ok(mut state) = state.try_borrow_mut() {
+                state.send_text(text);
+            }
+        });
+    }
+    controller.set_im_context(Some(&im_context));
     let area_for_clipboard = area.clone();
-    controller.connect_key_pressed(move |_controller, key, _keycode, modifiers| {
+    controller.connect_key_pressed(move |controller, key, _keycode, modifiers| {
         if is_paste_shortcut(key, modifiers) {
             paste_from_clipboard(&area_for_clipboard, state.clone(), false);
             return glib::Propagation::Stop;
         }
 
+        let modifiers = key_modifiers(controller, modifiers);
         if let Ok(mut state) = state.try_borrow_mut() {
             state.handle_key(key, modifiers);
         }
@@ -513,7 +527,7 @@ impl SessionTerminalState {
         }
     }
 
-    fn paste_text(&mut self, text: &str) {
+    fn send_text(&mut self, text: &str) {
         let Some(socket) = &mut self.socket else {
             return;
         };
@@ -521,6 +535,10 @@ impl SessionTerminalState {
         if socket.write_all(text.as_bytes()).is_ok() {
             let _ = socket.flush();
         }
+    }
+
+    fn paste_text(&mut self, text: &str) {
+        self.send_text(text);
     }
 }
 
@@ -704,6 +722,17 @@ fn paste_from_clipboard(
     });
 }
 
+fn key_modifiers(
+    controller: &EventControllerKey,
+    modifiers: gdk::ModifierType,
+) -> gdk::ModifierType {
+    controller
+        .current_event()
+        .and_then(|event| event.downcast::<gdk::KeyEvent>().ok())
+        .map(|event| modifiers.difference(event.consumed_modifiers()))
+        .unwrap_or(modifiers)
+}
+
 fn encode_key(key: gdk::Key, modifiers: gdk::ModifierType) -> Vec<u8> {
     match key {
         gdk::Key::Return => vec![b'\r'],
@@ -729,14 +758,17 @@ fn encode_key(key: gdk::Key, modifiers: gdk::ModifierType) -> Vec<u8> {
                 return Vec::new();
             }
 
-            if let Some(ch) = key.to_unicode() {
-                let mut out = Vec::new();
-                if modifiers.contains(gdk::ModifierType::ALT_MASK) {
-                    out.push(0x1b);
+            if modifiers.contains(gdk::ModifierType::ALT_MASK) {
+                if let Some(ch) = key.to_unicode() {
+                    let mut out = vec![0x1b];
+                    let mut buf = [0_u8; 4];
+                    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    return out;
                 }
-                let mut buf = [0_u8; 4];
-                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                return out;
+            }
+
+            if key.to_unicode().is_some() {
+                return Vec::new();
             }
 
             Vec::new()
