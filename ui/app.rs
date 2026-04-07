@@ -1,11 +1,12 @@
 use gtk::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry,
-    EventControllerKey, EventControllerMotion, Grid, Image, Label, ListBox, ListBoxRow,
-    Orientation, PolicyType, PropagationPhase, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow,
-    SelectionMode, Spinner, Widget, gdk,
+    gdk,
     gio::{self, FileMonitor, FileMonitorFlags},
     glib,
     prelude::*,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry,
+    EventControllerKey, EventControllerMotion, Grid, Image, Label, ListBox, ListBoxRow,
+    Orientation, PolicyType, PropagationPhase, ScrolledWindow, SelectionMode, Spinner, Widget,
+    STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -19,10 +20,10 @@ use swarm::forges::github::{self, PullRequestStatus, PullRequestStatusState};
 
 use crate::{
     data::{
-        WorkspaceEntry, WorkspaceGroup, add_repository, clone_workspace, collapse_repository,
-        create_workspace, current_workspace_branch, current_workspace_head, expand_repository,
-        load_workspace_groups, remove_workspace, rename_workspace, sync_repository,
-        workspace_head_path,
+        add_repository, clone_workspace, collapse_repository, create_workspace,
+        current_workspace_branch, current_workspace_head, expand_repository, load_workspace_groups,
+        remove_workspace, rename_workspace, sync_repository, workspace_head_path, WorkspaceEntry,
+        WorkspaceGroup,
     },
     workspace_panel::DetailWidgets,
 };
@@ -324,6 +325,29 @@ window {
   color: #d7eeff;
 }
 
+.session-pr-create {
+  min-height: 24px;
+  padding: 0 10px;
+  background: transparent;
+  color: #8fcaff;
+  border: 1px solid rgba(143, 202, 255, 0.35);
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.session-pr-create:hover {
+  background: rgba(143, 202, 255, 0.08);
+  color: #d7eeff;
+  border-color: rgba(143, 202, 255, 0.55);
+}
+
+.session-pr-create:disabled {
+  color: #5a6575;
+  border-color: rgba(255, 255, 255, 0.08);
+  background: transparent;
+}
+
 .session-tab {
   background: transparent;
   border-radius: 10px;
@@ -473,6 +497,7 @@ fn build_ui(app: &Application) {
         pending_pr_lookups: RefCell::new(HashSet::new()),
         pr_status_sender,
         pr_status_receiver: RefCell::new(pr_status_receiver),
+        creating_pr_workspaces: RefCell::new(HashSet::new()),
     });
 
     let sidebar_widgets = build_sidebar_widgets(&state);
@@ -511,6 +536,7 @@ pub struct AppState {
     pending_pr_lookups: RefCell<HashSet<String>>,
     pr_status_sender: mpsc::Sender<WorkspacePrUpdate>,
     pr_status_receiver: RefCell<mpsc::Receiver<WorkspacePrUpdate>>,
+    pub(crate) creating_pr_workspaces: RefCell<HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -664,7 +690,7 @@ fn render_current_ui(
     render_ui(state, &groups, preferred_workspace, preferred_session);
 }
 
-fn render_selected_workspace_detail(
+pub(crate) fn render_selected_workspace_detail(
     state: &Rc<AppState>,
     workspace_ref: &str,
     preferred_session: Option<String>,
@@ -890,7 +916,7 @@ fn workspace_pr_head_changed(cached: &CachedPrStatus, workspace: &WorkspaceEntry
     cached.head.as_deref() != Some(current_head.as_str())
 }
 
-fn request_workspace_pr_status(
+pub(crate) fn request_workspace_pr_status(
     state: &Rc<AppState>,
     workspace: &WorkspaceEntry,
     mark_loading: bool,
@@ -928,7 +954,7 @@ fn request_workspace_pr_status(
     });
 }
 
-fn clear_workspace_pr_status(state: &Rc<AppState>, workspace_ref: &str) {
+pub(crate) fn clear_workspace_pr_status(state: &Rc<AppState>, workspace_ref: &str) {
     state.pr_statuses.borrow_mut().remove(workspace_ref);
     state.pending_pr_lookups.borrow_mut().remove(workspace_ref);
 }
@@ -2037,7 +2063,7 @@ struct WorkspaceRow {
     delete_button: Button,
 }
 
-pub fn clear_box(container: &GtkBox) {
+pub(crate) fn clear_box(container: &GtkBox) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
