@@ -948,6 +948,20 @@ fn spawn_pty_child(cwd: &Path, command: &[String]) -> Result<(Pty, u32), SwarmEr
             }
         }
 
+        // share cargo build artifacts across worktrees in the same repo
+        if cwd.join("Cargo.toml").exists() {
+            if let Some(repo_dir) = cwd.parent().and_then(|p| p.parent()) {
+                let target_dir = repo_dir.join("target");
+                if let Ok(val) = CString::new(target_dir.as_os_str().as_encoded_bytes()) {
+                    if let Ok(key) = CString::new("CARGO_TARGET_DIR") {
+                        unsafe {
+                            libc::setenv(key.as_ptr(), val.as_ptr(), 0);
+                        }
+                    }
+                }
+            }
+        }
+
         let mut cstrings = Vec::with_capacity(command.len());
         for arg in command {
             match CString::new(arg.as_str()) {
