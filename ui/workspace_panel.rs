@@ -29,7 +29,7 @@ pub struct DetailWidgets {
 
 impl DetailWidgets {
     pub fn new(state: &Rc<AppState>) -> Self {
-        let container = GtkBox::new(Orientation::Vertical, 10);
+        let container = GtkBox::new(Orientation::Vertical, 0);
         container.set_hexpand(true);
         container.set_vexpand(true);
 

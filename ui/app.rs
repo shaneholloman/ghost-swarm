@@ -126,7 +126,7 @@ window {
 }
 
 .content {
-  padding: 16px 20px;
+  padding: 6px 10px;
 }
 
 .repo-row {
@@ -302,7 +302,7 @@ window {
 }
 
 .session-toolbar {
-  margin-bottom: 12px;
+  margin-bottom: 6px;
 }
 
 .session-toolbar-spacer {
@@ -345,7 +345,7 @@ window {
   color: #8d98a8;
   font-size: 11px;
   font-weight: 700;
-  padding: 7px 10px;
+  padding: 4px 9px;
 }
 
 .session-tab-active .session-tab-select {
@@ -396,9 +396,9 @@ window {
 .terminal-host {
   background: linear-gradient(180deg, rgba(19, 25, 36, 0.96) 0%, rgba(12, 17, 26, 0.98) 100%);
   border: 1px solid rgba(154, 182, 255, 0.14);
-  border-radius: 18px;
+  border-radius: 12px;
   min-height: 560px;
-  padding: 10px 10px 10px 0;
+  padding: 2px 4px 2px 0;
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.04), 0 18px 48px rgba(0, 0, 0, 0.24);
 }
 
@@ -416,7 +416,7 @@ window {
 
 .terminal-host scrollbar {
   background: transparent;
-  margin: 10px 8px 10px 0;
+  margin: 2px 4px 2px 0;
   min-width: 10px;
 }
 
