@@ -1,7 +1,7 @@
 use gtk::{
     Adjustment, Box as GtkBox, DrawingArea, EventControllerKey, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, IMMulticontext, Orientation, Scrollbar, gdk, glib,
-    pango, prelude::*,
+    EventControllerScrollFlags, GestureClick, GestureDrag, IMMulticontext, Orientation,
+    PopoverMenu, Scrollbar, gdk, gio, glib, pango, prelude::*,
 };
 use libghostty_vt::{
     RenderState, Terminal, TerminalOptions, ffi,
@@ -93,6 +93,8 @@ pub fn terminal_host(session: &SessionEntry) -> GtkBox {
     install_key_controller(&area, state.clone());
     install_scroll_controller(&area, state.clone());
     install_focus_controller(&area, state.clone());
+    install_drag_controller(&area, state.clone());
+    install_context_menu(&area, state.clone());
     install_scrollbar_sync(&adjustment, state.clone());
     install_socket_pump(state);
 
@@ -146,6 +148,15 @@ fn install_key_controller(area: &DrawingArea, state: Rc<RefCell<SessionTerminalS
             return glib::Propagation::Stop;
         }
 
+        if is_copy_shortcut(key, modifiers) {
+            if let Ok(mut s) = state.try_borrow_mut() {
+                if let Some(text) = s.copy_selection_text() {
+                    area_for_clipboard.clipboard().set_text(&text);
+                }
+            }
+            return glib::Propagation::Stop;
+        }
+
         let modifiers = key_modifiers(controller, modifiers);
         if let Ok(mut state) = state.try_borrow_mut() {
             state.handle_key(key, modifiers);
@@ -153,6 +164,105 @@ fn install_key_controller(area: &DrawingArea, state: Rc<RefCell<SessionTerminalS
         glib::Propagation::Stop
     });
     area.add_controller(controller);
+}
+
+fn install_context_menu(area: &DrawingArea, state: Rc<RefCell<SessionTerminalState>>) {
+    let menu = gio::Menu::new();
+    menu.append(Some("Copy"), Some("term.copy"));
+    menu.append(Some("Paste"), Some("term.paste"));
+
+    let popover = PopoverMenu::from_model(Some(&menu));
+    popover.set_has_arrow(false);
+    popover.set_parent(area);
+
+    let action_group = gio::SimpleActionGroup::new();
+
+    let copy_action = gio::SimpleAction::new("copy", None);
+    {
+        let area = area.clone();
+        let state = state.clone();
+        copy_action.connect_activate(move |_, _| {
+            if let Ok(mut s) = state.try_borrow_mut() {
+                if let Some(text) = s.copy_selection_text() {
+                    area.clipboard().set_text(&text);
+                }
+            }
+        });
+    }
+    action_group.add_action(&copy_action);
+
+    let paste_action = gio::SimpleAction::new("paste", None);
+    {
+        let area = area.clone();
+        let state = state.clone();
+        paste_action.connect_activate(move |_, _| {
+            paste_from_clipboard(&area, state.clone(), false);
+        });
+    }
+    action_group.add_action(&paste_action);
+
+    area.insert_action_group("term", Some(&action_group));
+
+    let gesture = GestureClick::new();
+    gesture.set_button(gdk::BUTTON_SECONDARY);
+    {
+        let popover = popover.clone();
+        let area = area.clone();
+        gesture.connect_pressed(move |_g, _n, x, y| {
+            area.grab_focus();
+            let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+            popover.set_pointing_to(Some(&rect));
+            popover.popup();
+        });
+    }
+    area.add_controller(gesture);
+
+    {
+        let popover = popover.clone();
+        area.connect_unrealize(move |_| popover.unparent());
+    }
+}
+
+fn install_drag_controller(area: &DrawingArea, state: Rc<RefCell<SessionTerminalState>>) {
+    let drag = GestureDrag::new();
+    drag.set_button(gdk::BUTTON_PRIMARY);
+    {
+        let state = state.clone();
+        drag.connect_drag_begin(move |_drag, x, y| {
+            if let Ok(mut s) = state.try_borrow_mut() {
+                s.begin_selection(x, y);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        drag.connect_drag_update(move |drag, dx, dy| {
+            let Some((sx, sy)) = drag.start_point() else {
+                return;
+            };
+            if let Ok(mut s) = state.try_borrow_mut() {
+                s.update_selection(sx + dx, sy + dy);
+            }
+        });
+    }
+    {
+        let area = area.clone();
+        drag.connect_drag_end(move |drag, dx, dy| {
+            let Some((sx, sy)) = drag.start_point() else {
+                return;
+            };
+            let text_opt = if let Ok(mut s) = state.try_borrow_mut() {
+                s.update_selection(sx + dx, sy + dy);
+                s.copy_selection_text()
+            } else {
+                None
+            };
+            if let Some(text) = text_opt {
+                area.primary_clipboard().set_text(&text);
+            }
+        });
+    }
+    area.add_controller(drag);
 }
 
 fn install_scroll_controller(area: &DrawingArea, state: Rc<RefCell<SessionTerminalState>>) {
@@ -205,6 +315,56 @@ struct SessionTerminalState {
     cell_width: f64,
     cell_height: f64,
     font_desc: pango::FontDescription,
+    selection: Option<Selection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelectionPoint {
+    /// Column within the row.
+    col: u16,
+    /// Absolute row index in the scrollback (scrollbar offset + viewport row).
+    row: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Selection {
+    anchor: SelectionPoint,
+    head: SelectionPoint,
+}
+
+impl Selection {
+    fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+
+    fn normalized(&self) -> (SelectionPoint, SelectionPoint) {
+        let a = (self.anchor.row, self.anchor.col);
+        let h = (self.head.row, self.head.col);
+        if a <= h {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    fn contains(&self, col: u16, row: u64) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let (start, end) = self.normalized();
+        if row < start.row || row > end.row {
+            return false;
+        }
+        if start.row == end.row {
+            col >= start.col && col < end.col
+        } else if row == start.row {
+            col >= start.col
+        } else if row == end.row {
+            col < end.col
+        } else {
+            true
+        }
+    }
 }
 
 impl SessionTerminalState {
@@ -256,6 +416,7 @@ impl SessionTerminalState {
             cell_width: 8.6,
             cell_height: 18.0,
             font_desc: pango::FontDescription::new(),
+            selection: None,
         }))
     }
 
@@ -304,6 +465,9 @@ impl SessionTerminalState {
         self.update_metrics(cr);
         self.resize_terminal(width, height);
 
+        let scrollbar_offset = self.terminal.scrollbar().ok().map(|s| s.offset).unwrap_or(0);
+        let selection = self.selection;
+
         let Ok(snapshot) = self.render_state.update(&self.terminal) else {
             return;
         };
@@ -325,10 +489,20 @@ impl SessionTerminalState {
                 break;
             };
 
+            let abs_row = scrollbar_offset.saturating_add(u64::from(row_index));
+
             let mut col_index = 0_u16;
             while let Some(cell) = cells.next() {
                 let style = cell.style().unwrap_or_default();
-                let (fg, bg) = resolved_colors(cell, &style, colors.foreground, colors.background);
+                let (mut fg, mut bg) =
+                    resolved_colors(cell, &style, colors.foreground, colors.background);
+
+                let selected = selection
+                    .map(|s| s.contains(col_index, abs_row))
+                    .unwrap_or(false);
+                if selected {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
 
                 let x = HORIZONTAL_PADDING + (f64::from(col_index) * self.cell_width);
                 let y = VERTICAL_PADDING + (f64::from(row_index) * self.cell_height);
@@ -540,6 +714,99 @@ impl SessionTerminalState {
     fn paste_text(&mut self, text: &str) {
         self.send_text(text);
     }
+
+    fn pixel_to_cell(&self, x: f64, y: f64) -> (u16, u16) {
+        let cols = self.last_cols.max(1);
+        let rows = self.last_rows.max(1);
+        let col_f = ((x - HORIZONTAL_PADDING) / self.cell_width).floor();
+        let row_f = ((y - VERTICAL_PADDING) / self.cell_height).floor();
+        let col = col_f.clamp(0.0, f64::from(cols - 1)) as u16;
+        let row = row_f.clamp(0.0, f64::from(rows - 1)) as u16;
+        (col, row)
+    }
+
+    fn viewport_row_to_absolute(&self, vrow: u16) -> u64 {
+        let offset = self.terminal.scrollbar().map(|s| s.offset).unwrap_or(0);
+        offset.saturating_add(u64::from(vrow))
+    }
+
+    fn begin_selection(&mut self, x: f64, y: f64) {
+        let (col, vrow) = self.pixel_to_cell(x, y);
+        let row = self.viewport_row_to_absolute(vrow);
+        let point = SelectionPoint { col, row };
+        self.selection = Some(Selection {
+            anchor: point,
+            head: point,
+        });
+        self.area.queue_draw();
+    }
+
+    fn update_selection(&mut self, x: f64, y: f64) {
+        if self.selection.is_none() {
+            return;
+        }
+        let (col, vrow) = self.pixel_to_cell(x, y);
+        let row = self.viewport_row_to_absolute(vrow);
+        if let Some(selection) = self.selection.as_mut() {
+            selection.head = SelectionPoint { col, row };
+        }
+        self.area.queue_draw();
+    }
+
+    fn copy_selection_text(&mut self) -> Option<String> {
+        let selection = self.selection?;
+        if selection.is_empty() {
+            return None;
+        }
+        let (start, end) = selection.normalized();
+
+        let snapshot = self.render_state.update(&self.terminal).ok()?;
+        let scrollbar_offset = self.terminal.scrollbar().ok().map(|s| s.offset).unwrap_or(0);
+
+        let mut rows = self.row_iterator.update(&snapshot).ok()?;
+        let mut output = String::new();
+        let mut visual_index: u16 = 0;
+        let mut emitted_any = false;
+
+        while let Some(row) = rows.next() {
+            let abs_row = scrollbar_offset.saturating_add(u64::from(visual_index));
+            visual_index = visual_index.saturating_add(1);
+
+            if abs_row < start.row || abs_row > end.row {
+                continue;
+            }
+
+            let start_col = if abs_row == start.row { start.col } else { 0 };
+            let end_col_exclusive = if abs_row == end.row { end.col } else { u16::MAX };
+
+            let Ok(mut cells) = self.cell_iterator.update(row) else {
+                continue;
+            };
+
+            let mut line = String::new();
+            let mut col_idx: u16 = 0;
+            while let Some(cell) = cells.next() {
+                if col_idx >= start_col && col_idx < end_col_exclusive {
+                    let graphemes = cell.graphemes().unwrap_or_default();
+                    if graphemes.is_empty() {
+                        line.push(' ');
+                    } else {
+                        line.extend(graphemes);
+                    }
+                }
+                col_idx = col_idx.saturating_add(1);
+            }
+
+            let trimmed = line.trim_end_matches(|c: char| c == ' ' || c == '\0');
+            if emitted_any {
+                output.push('\n');
+            }
+            output.push_str(trimmed);
+            emitted_any = true;
+        }
+
+        if output.is_empty() { None } else { Some(output) }
+    }
 }
 
 fn resolved_colors(
@@ -698,6 +965,12 @@ fn is_paste_shortcut(key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
 
     (ctrl_shift && matches!(key, gdk::Key::V | gdk::Key::v))
         || (shift_only && matches!(key, gdk::Key::Insert))
+}
+
+fn is_copy_shortcut(key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+    let ctrl_shift = modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+        && modifiers.contains(gdk::ModifierType::SHIFT_MASK);
+    ctrl_shift && matches!(key, gdk::Key::C | gdk::Key::c)
 }
 
 fn paste_from_clipboard(
